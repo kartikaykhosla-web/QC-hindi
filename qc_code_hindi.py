@@ -387,6 +387,23 @@ def normalize_for_match(text: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
+def normalize_for_equality(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+def is_noop_reason(reason: str) -> bool:
+    lower = (reason or "").strip().lower()
+    return lower in {
+        "no corrections needed",
+        "no correction needed",
+        "no error",
+        "no errors",
+        "कोई त्रुटि नहीं",
+        "कोई गलती नहीं",
+    }
+
+def is_noop_correction(original: str, corrected: str) -> bool:
+    return normalize_for_equality(original) == normalize_for_equality(corrected)
+
 def find_context_snippet(article_data, needle: str) -> str:
     if not needle:
         return ""
@@ -496,6 +513,8 @@ def filter_gemini_rows(raw_table, article_text):
             continue
         if any(c.strip() in {"-", "--", "---"} for c in cols):
             continue
+        if is_noop_reason(reason) or is_noop_correction(original, corrected):
+            continue
 
         if normalize_for_match(original) in norm_article:
             if not header_added:
@@ -532,6 +551,8 @@ def split_spelling_grammar_hi(table_md):
         reason = r.strip()
         if not reason or reason in {"-", "--", "---"}:
             continue
+        if is_noop_reason(reason) or is_noop_correction(o, c):
+            continue
 
         row = f"| {o} | {c} | {reason} |"
 
@@ -564,6 +585,8 @@ def parse_language_rows(table_md, article_data=None):
             continue
         if any(x.strip() in {"-", "--", "---"} for x in (original, corrected, reason)):
             continue
+        if is_noop_reason(reason) or is_noop_correction(original, corrected):
+            continue
 
         key = (canon_hi(original), canon_hi(corrected), canon_hi(reason))
         if key in seen:
@@ -579,6 +602,8 @@ def parse_language_rows(table_md, article_data=None):
             original, corrected, reason = expand_language_row_context(
                 article_data, original, corrected, reason
             )
+        if is_noop_reason(reason) or is_noop_correction(original, corrected):
+            continue
         rows.append((original, corrected, reason))
 
     return rows
@@ -607,10 +632,14 @@ def parse_editorial_rows(editorial_md, article_data=None):
             excerpt.strip(),
             corrected.strip(),
         )
+        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected):
+            continue
         if article_data:
             excerpt, corrected, _ = expand_language_row_context(
                 article_data, excerpt, corrected, issue
             )
+        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected):
+            continue
 
         key = (canon_hi(issue), canon_hi(location), canon_hi(excerpt), canon_hi(corrected))
         if key in seen:
@@ -655,6 +684,8 @@ def build_language_tables(language_rows, editorial_rows=None):
 
     for original, corrected, reason in (language_rows or []) + (editorial_rows or []):
         if not original or not corrected or not reason:
+            continue
+        if is_noop_reason(reason) or is_noop_correction(original, corrected):
             continue
 
         key = (canon_hi(original), canon_hi(corrected), canon_hi(reason))
@@ -718,7 +749,7 @@ def filter_editorial_rows(raw_table, article_text):
             continue
 
         # Corrected must be different from excerpt (after trimming)
-        if canon_hi(excerpt) == canon_hi(corrected):
+        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected):
             continue
 
         if not header_added:
