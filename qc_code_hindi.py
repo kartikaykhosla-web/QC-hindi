@@ -51,7 +51,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-23-1"
+PROMPT_VERSION_HI = "2026-03-24-1"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -404,6 +404,57 @@ def is_noop_reason(reason: str) -> bool:
 def is_noop_correction(original: str, corrected: str) -> bool:
     return normalize_for_equality(original) == normalize_for_equality(corrected)
 
+def should_project_editorial_to_language(issue: str) -> bool:
+    lower = (issue or "").strip().lower()
+    if not lower:
+        return False
+    return any(token in lower for token in (
+        "spelling",
+        "typo",
+        "grammar",
+        "punctuation",
+        "spacing",
+        "quotation",
+        "quote style for direct speech",
+        "sentence ending punctuation",
+    ))
+
+def is_no_issue_fact(issue: str, correction: str) -> bool:
+    issue_lower = (issue or "").strip().lower()
+    correction_lower = (correction or "").strip().lower()
+    if issue_lower in {"", "-", "--", "---", "no issue", "no issues"}:
+        return True
+    if correction_lower in {"", "-", "--", "---", "no issue", "no issues"}:
+        return True
+    return False
+
+def is_style_only_fact(statement: str, issue: str, correction: str) -> bool:
+    lower_issue = (issue or "").strip().lower()
+    lower_correction = (correction or "").strip().lower()
+    combined = f"{lower_issue} {lower_correction}"
+
+    if canon_hi(statement) == canon_hi(correction):
+        return True
+
+    style_markers = (
+        "spelling",
+        "grammar",
+        "punctuation",
+        "style",
+        "format",
+        "wording",
+        "terminology",
+        "abbreviation",
+        "full form",
+        "quote",
+        "comma",
+        "should be",
+        "use ",
+        "replace ",
+        "preferred",
+    )
+    return any(marker in combined for marker in style_markers)
+
 def find_context_snippet(article_data, needle: str) -> str:
     if not needle:
         return ""
@@ -655,6 +706,8 @@ def parse_editorial_as_language_rows(editorial_md, article_data=None):
     seen = set()
 
     for issue, location, excerpt, corrected in parse_editorial_rows(editorial_md, article_data):
+        if not should_project_editorial_to_language(issue):
+            continue
         key = (canon_hi(excerpt), canon_hi(corrected), canon_hi(issue))
         if key in seen:
             continue
@@ -794,15 +847,14 @@ Must-follow Hindi editorial rules:
 - Use the Hindi danda "।" to end sentences (not a period).
 - Use double quotes for direct speech and official statements.
 - Use single quotes for titles (books, films, shows, programs, named schemes).
-- At first mention, spell out the full name of an organisation, institution, authority, political party, law, or scheme; if a standard abbreviation is appropriate, add it in parentheses and use the abbreviation later.
-- Do not start a sentence with "लेकिन" or "और".
-- No comma before/after "और"; no comma after "कि" or "वहीं".
-- Use comma after "हालांकि", "अनुसार", "दरअसल", "मुताबिक".
+- Flag first-mention abbreviation issues only when the short form refers to a named entity
+  (such as an organisation, authority, institution, political party, law, scheme, or court)
+  and the expansion is genuinely needed for clarity.
+- Do not force expansion of common technical abbreviations, scientific labels, measurements,
+  or interface tags.
 - If a headline/subheading contains क्या/कैसे/क्यों/कब/कितना, it must end with "?".
 - Use exactly three dots for ellipsis "...", not more.
 - Use numbers 1–9 in words, 10+ in numerals (except dates, time, prices, recipe ingredients).
-- Avoid chandra-bindu usage; prefer anusvara (e.g., पहुंचा not पहुँचा; जटिलताएं not जटिलताएँ).
-- Prefer anusvara in half "म" cases (लंबा not लम्बा).
 - Do not use honorifics श्री/श्रीमती for any person name (only "महामहिम" for the President when needed).
 
 {rules_block}
@@ -810,9 +862,13 @@ Must-follow Hindi editorial rules:
 Guidance:
 - The preferred spellings list is optional and incomplete. Use it as hints only.
 - Still detect and flag other spelling/grammar issues dynamically.
-- Treat first-mention abbreviation problems as valid grammar/style issues when the full form should be introduced.
+- Treat first-mention abbreviation problems as valid issues only when the short form is unclear
+  without expansion in that article context.
 - Do not stop after finding the first issue in a paragraph.
 - Identify all clear issues in the paragraph, including quote misuse, punctuation, spacing, wording, and abbreviation-introduction problems.
+- Do not enforce subjective style preferences such as replacing acceptable loanwords,
+  banning sentence openings like "लेकिन", or mandating commas after specific discourse markers.
+- Do not translate acceptable English technical terms into Hindi just to make a correction.
 
 Constraints:
 - Use only TEXT
@@ -898,16 +954,14 @@ Use English for Issue and Corrected Text. Keep fixes concise and specific.
 Check for clear violations of these Hindi editorial rules:
 - Use the Hindi danda "।" to end sentences (not a period).
 - Use double quotes for direct speech; single quotes for titles.
-- At first mention, spell out the full name of an organisation, institution, authority, political party, law, or scheme; if a standard abbreviation is appropriate, add it in parentheses and use the abbreviation later.
-- Do not start a sentence with "लेकिन" or "और".
-- No comma before/after "और"; no comma after "कि" or "वहीं".
-- Use comma after "हालांकि", "अनुसार", "दरअसल", "मुताबिक".
+- Flag first-mention abbreviation issues only for named entities or terms that are genuinely unclear without expansion.
+- Do not force expansion of common technical abbreviations, scientific labels, measurements, or UI labels.
 - If a headline/subheading contains क्या/कैसे/क्यों/कब/कितना, it must end with "?".
 - Use exactly three dots for ellipsis "...".
 - Use numbers 1–9 in words, 10+ in numerals (except dates, time, prices, recipe ingredients).
-- Avoid chandra-bindu; prefer anusvara (पहुंचा not पहुँचा; जटिलताएं not जटिलताएँ).
-- Prefer anusvara in half "म" cases (लंबा not लम्बा).
 - Do not use honorifics श्री/श्रीमती for names (only "महामहिम" for the President when needed).
+- Do not enforce subjective style swaps, blanket comma preferences, or bans on sentence openings like "लेकिन"/"और".
+- Do not translate acceptable English technical terms just to create a correction.
 
 Rules for output:
 - Excerpt must be an exact substring from the TEXT.
@@ -928,14 +982,13 @@ Use English for Issue and Corrected Text.
 
 Check only these categories, but identify all applicable issues from the paragraph:
 - wrong quote style for direct speech
-- single quotes used for non-title highlighted terms or labels
-- chandra-bindu where anusvara is preferred
-- abbreviation/acronym used before full form at first mention
-- repeated discourse markers or repetitive sentence openings within the same paragraph
+- sentence-ending punctuation or bracket spacing errors
+- abbreviation/acronym used before full form at first mention only when the abbreviation refers to a named entity and expansion is required for clarity
 
 Rules for output:
 - Excerpt must be an exact substring from the TEXT.
 - Corrected Text must be the fixed version of Excerpt and must differ from Excerpt.
+- Do not flag acceptable technical labels, measurement terms, or stylistic preferences.
 - Return all clear issues, even if multiple rows come from the same paragraph.
 
 Return output strictly as a markdown table with header:
@@ -1078,6 +1131,8 @@ Rules:
 - No external knowledge
 - Quote exact text
 - No paraphrasing
+- Only flag direct contradictions, impossible combinations, or statements that are unsupported by the article itself.
+- Do not flag style, wording, naming preference, branding simplification, abbreviation expansion, punctuation, or grammar as factual issues.
 
 Return table:
 | Statement | Issue | Correct Fact |
@@ -1110,6 +1165,10 @@ STATEMENTS:
             if s.lower() == "statement" or i.lower() == "issue" or c.lower() == "correct fact":
                 continue
             if any(x.strip() in {"-", "--", "---"} for x in (s, i, c)):
+                continue
+            if is_no_issue_fact(i, c):
+                continue
+            if is_style_only_fact(s, i, c):
                 continue
 
             sig = (canon_hi(s), canon_hi(i))
