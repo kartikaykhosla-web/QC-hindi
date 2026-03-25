@@ -26,6 +26,7 @@ import requests
 import hashlib
 import tempfile
 import html
+import unicodedata
 import streamlit as st
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
@@ -54,7 +55,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-25-4"
+PROMPT_VERSION_HI = "2026-03-25-6"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -672,6 +673,9 @@ def normalize_quote_style(text: str) -> str:
         "‛": "'",
     }))
 
+def strip_quote_chars(text: str) -> str:
+    return re.sub(r"""["'“”‘’„‟‚‛]""", "", text or "")
+
 def normalize_for_equality(text: str) -> str:
     return re.sub(r"\s+", " ", normalize_quote_style((text or "").strip()))
 
@@ -688,6 +692,59 @@ def is_noop_reason(reason: str) -> bool:
 
 def is_noop_correction(original: str, corrected: str) -> bool:
     return normalize_for_equality(original) == normalize_for_equality(corrected)
+
+def is_quote_only_correction(original: str, corrected: str) -> bool:
+    original_base = normalize_for_equality(strip_quote_chars(original))
+    corrected_base = normalize_for_equality(strip_quote_chars(corrected))
+    if not original_base or not corrected_base:
+        return False
+    return original_base == corrected_base
+
+def is_heading_like_hi(text: str) -> bool:
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t:
+        return False
+    if len(t) > 140:
+        return False
+
+    word_count = len(t.split())
+    if word_count <= 12 and not re.search(r"[।!?]$", t):
+        return True
+
+    if ":" in t and word_count <= 18:
+        return True
+
+    heading_markers = (
+        "fact check:",
+        "फैक्ट चेक:",
+        "exclusive:",
+        "explained:",
+        "live:",
+        "photo gallery:",
+        "video:",
+    )
+    lower = t.lower()
+    return any(lower.startswith(marker) for marker in heading_markers)
+
+def is_heading_danda_correction(original: str, corrected: str, reason: str) -> bool:
+    original_norm = normalize_for_equality(original)
+    corrected_norm = normalize_for_equality(corrected)
+    if not original_norm or not corrected_norm:
+        return False
+
+    reason_lower = (reason or "").strip().lower()
+    if not any(marker in reason_lower for marker in (
+        "पूर्ण विराम",
+        "sentence-ending punctuation",
+        "danda",
+        "punctuation",
+    )):
+        return False
+
+    if not is_heading_like_hi(original_norm):
+        return False
+
+    return corrected_norm == f"{original_norm}।"
 
 def is_ignored_styleguide_issue(text: str) -> bool:
     lower = (text or "").strip().lower()
@@ -859,7 +916,9 @@ def filter_gemini_rows(raw_table, article_text):
             continue
         if any(c.strip() in {"-", "--", "---"} for c in cols):
             continue
-        if is_noop_reason(reason) or is_noop_correction(original, corrected):
+        if is_noop_reason(reason) or is_noop_correction(original, corrected) or is_quote_only_correction(original, corrected):
+            continue
+        if is_heading_danda_correction(original, corrected, reason):
             continue
         if is_ignored_styleguide_issue(reason):
             continue
@@ -899,15 +958,42 @@ def classify_language_issue(original, corrected, reason):
         return "spelling"
     return "grammar"
 
+def split_grapheme_like_units(text: str):
+    units = []
+    current = ""
+
+    for ch in text or "":
+        if not current:
+            current = ch
+            continue
+
+        if (
+            unicodedata.combining(ch)
+            or ch in {"\u200c", "\u200d", "\ufe0f", "\u094d"}
+            or current.endswith(("\u094d", "\u200c", "\u200d"))
+        ):
+            current += ch
+            continue
+
+        units.append(current)
+        current = ch
+
+    if current:
+        units.append(current)
+
+    return units
+
 def highlight_diff_pair(original: str, corrected: str):
-    matcher = SequenceMatcher(a=original or "", b=corrected or "")
+    original_units = split_grapheme_like_units(original or "")
+    corrected_units = split_grapheme_like_units(corrected or "")
+    matcher = SequenceMatcher(a=original_units, b=corrected_units)
 
     original_parts = []
     corrected_parts = []
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        original_chunk = (original or "")[i1:i2]
-        corrected_chunk = (corrected or "")[j1:j2]
+        original_chunk = "".join(original_units[i1:i2])
+        corrected_chunk = "".join(corrected_units[j1:j2])
 
         if tag == "equal":
             original_parts.append(html.escape(original_chunk))
@@ -993,7 +1079,9 @@ def split_spelling_grammar_hi(table_md):
         reason = r.strip()
         if not reason or reason in {"-", "--", "---"}:
             continue
-        if is_noop_reason(reason) or is_noop_correction(o, c):
+        if is_noop_reason(reason) or is_noop_correction(o, c) or is_quote_only_correction(o, c):
+            continue
+        if is_heading_danda_correction(o, c, reason):
             continue
         if is_ignored_styleguide_issue(reason):
             continue
@@ -1019,7 +1107,9 @@ def parse_language_rows(table_md, article_data=None):
             continue
         if any(x.strip() in {"-", "--", "---"} for x in (original, corrected, reason)):
             continue
-        if is_noop_reason(reason) or is_noop_correction(original, corrected):
+        if is_noop_reason(reason) or is_noop_correction(original, corrected) or is_quote_only_correction(original, corrected):
+            continue
+        if is_heading_danda_correction(original, corrected, reason):
             continue
         if is_ignored_styleguide_issue(reason):
             continue
@@ -1038,7 +1128,9 @@ def parse_language_rows(table_md, article_data=None):
             original, corrected, reason = expand_language_row_context(
                 article_data, original, corrected, reason
             )
-        if is_noop_reason(reason) or is_noop_correction(original, corrected):
+        if is_noop_reason(reason) or is_noop_correction(original, corrected) or is_quote_only_correction(original, corrected):
+            continue
+        if is_heading_danda_correction(original, corrected, reason):
             continue
         if is_ignored_styleguide_issue(reason):
             continue
@@ -1070,7 +1162,9 @@ def parse_editorial_rows(editorial_md, article_data=None):
             excerpt.strip(),
             corrected.strip(),
         )
-        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected):
+        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected) or is_quote_only_correction(excerpt, corrected):
+            continue
+        if is_heading_danda_correction(excerpt, corrected, issue):
             continue
         if is_ignored_styleguide_issue(issue):
             continue
@@ -1078,7 +1172,9 @@ def parse_editorial_rows(editorial_md, article_data=None):
             excerpt, corrected, _ = expand_language_row_context(
                 article_data, excerpt, corrected, issue
             )
-        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected):
+        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected) or is_quote_only_correction(excerpt, corrected):
+            continue
+        if is_heading_danda_correction(excerpt, corrected, issue):
             continue
         if is_ignored_styleguide_issue(issue):
             continue
@@ -1129,7 +1225,9 @@ def build_language_tables(language_rows, editorial_rows=None):
     for original, corrected, reason in (language_rows or []) + (editorial_rows or []):
         if not original or not corrected or not reason:
             continue
-        if is_noop_reason(reason) or is_noop_correction(original, corrected):
+        if is_noop_reason(reason) or is_noop_correction(original, corrected) or is_quote_only_correction(original, corrected):
+            continue
+        if is_heading_danda_correction(original, corrected, reason):
             continue
         if is_ignored_styleguide_issue(reason):
             continue
@@ -1187,7 +1285,9 @@ def filter_editorial_rows(raw_table, article_text):
             continue
 
         # Corrected must be different from excerpt (after trimming)
-        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected):
+        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected) or is_quote_only_correction(excerpt, corrected):
+            continue
+        if is_heading_danda_correction(excerpt, corrected, issue):
             continue
         if is_ignored_styleguide_issue(issue):
             continue
@@ -1233,6 +1333,7 @@ Scope:
 
 Must-follow Hindi editorial rules:
 - Use the Hindi danda "।" to end sentences (not a period).
+- Do not add a danda to headlines, decks, labels, or subheadings that are not full sentences.
 - Use double quotes for direct speech and official statements.
 - Use single quotes for titles (books, films, shows, programs, named schemes).
 - Straight and curly variants of the same quote type are both acceptable; do not flag quote-shape-only swaps such as "..." vs “...”.
@@ -1348,6 +1449,7 @@ Use English for Issue and Corrected Text. Keep fixes concise and specific.
 
 Check for clear violations of these Hindi editorial rules:
 - Use the Hindi danda "।" to end sentences (not a period).
+- Do not add a danda to headlines, decks, labels, or subheadings that are not full sentences.
 - Use double quotes for direct speech; single quotes for titles.
 - Straight and curly variants of the same quote type are both acceptable; do not flag quote-shape-only swaps such as "..." vs “...”.
 - This publication style avoids chandrabindu in normal house-style spellings; prefer forms like "पांच" over "पाँच".
