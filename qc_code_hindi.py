@@ -54,7 +54,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-25-2"
+PROMPT_VERSION_HI = "2026-03-25-4"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -169,6 +169,18 @@ ARTICLE_ROOT_SELECTORS = [
 ]
 
 DOMAIN_ARTICLE_SELECTORS = {
+    "jagran.com": [
+        "article",
+        ".ArticleDetail_ArticleDetail__NQJvJ",
+        ".jg_m-article",
+        "[itemprop='articleBody']",
+    ],
+    "www.jagran.com": [
+        "article",
+        ".ArticleDetail_ArticleDetail__NQJvJ",
+        ".jg_m-article",
+        "[itemprop='articleBody']",
+    ],
     "herzindagi.com": [
         "[itemprop='articleBody']",
         "article",
@@ -213,6 +225,8 @@ EXCLUDED_SUBTREE_SELECTORS = [
     "noscript",
     "form",
     "nav",
+    "figure",
+    "figcaption",
     "footer",
     "aside",
     "header",
@@ -283,6 +297,8 @@ def should_skip_extracted_text(text: str) -> bool:
         return True
     if lower.startswith("...और पढ़ें") or lower.startswith("और पढ़ें"):
         return True
+    if lower.startswith("जानिए मुख्य बातें") or "खबर का सार एक नजर में" in lower:
+        return True
     if is_navigation_blob(compact):
         return True
 
@@ -300,6 +316,52 @@ def sanitize_extracted_text(text: str) -> str:
 def get_domain(url: str) -> str:
     return (urlparse(url).netloc or "").lower()
 
+def is_jagran_domain(url: str) -> bool:
+    return get_domain(url) in {"jagran.com", "www.jagran.com"}
+
+def has_inline_read_more(raw_text: str) -> bool:
+    compact = re.sub(r"\s+", " ", (raw_text or "").strip())
+    return "...और पढ़ें" in compact or compact.endswith("और पढ़ें")
+
+def add_meta_description_summary(soup, url, content, seen):
+    if not is_jagran_domain(url):
+        return
+
+    meta = (
+        soup.find("meta", attrs={"name": "description"})
+        or soup.find("meta", attrs={"property": "og:description"})
+    )
+    if not meta:
+        return
+
+    summary = sanitize_extracted_text(meta.get("content", ""))
+    if len(summary) < 80:
+        return
+    if should_skip_extracted_text(summary):
+        return
+    if summary in seen:
+        return
+
+    seen.add(summary)
+    content.append(("paragraph", summary))
+
+def build_source_style_notes(source_context: str) -> str:
+    domain = get_domain(source_context) if source_context else ""
+    if domain in {
+        "herzindagi.com",
+        "www.herzindagi.com",
+        "onlymyhealth.com",
+        "www.onlymyhealth.com",
+    }:
+        return """
+Domain style notes:
+- In Hindi body copy for lifestyle, home, recipe, and health content, prefer clear Devanagari transliteration for standalone English common nouns or room/object labels when the term is not a brand name and the correction is unambiguous (for example, "Sink" -> "सिंक", "Living Room" -> "लिविंग रूम").
+- Normalize broken Unicode half-letter / ZWJ rendering artifacts in Devanagari spellings (for example, forms like "स्‍टाइलिश", "अच्‍छी", "जिन्‍हें") to their standard rendered spellings.
+- Use house-style joined compounds where the standard closed form is clear (for example, "रसोईघर").
+- Use a hyphen in letter-shape compounds where appropriate (for example, "एल-शेप", "यू-शेप"), but do not add a hyphen to idiomatic expressions where it is not standard.
+"""
+    return ""
+
 def is_sufficient_article_body(content) -> bool:
     paragraphs = [text for ctype, text in content if ctype == "paragraph"]
     total_chars = sum(len(text) for text in paragraphs)
@@ -313,7 +375,10 @@ def extend_content_from_container(container, content, seen):
     extracted_any = False
 
     for el in clone.find_all(["p", "li"], recursive=True):
-        txt = el.get_text(separator=" ", strip=True)
+        raw_txt = el.get_text(separator=" ", strip=True)
+        if has_inline_read_more(raw_txt):
+            continue
+        txt = raw_txt
         txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
         txt = sanitize_extracted_text(txt)
         if not txt or len(txt) < 20:
@@ -475,6 +540,7 @@ def clean_article(url):
     h1 = soup.find("h1")
     if h1:
         content.append(("heading", h1.get_text(strip=True)))
+    add_meta_description_summary(soup, url, content, seen)
 
     structured_content = []
     extract_from_article_roots(soup, url, structured_content, set())
@@ -487,7 +553,10 @@ def clean_article(url):
         return content + json_content
 
     for el in soup.find_all(["p", "li"], recursive=True):
-        txt = el.get_text(separator=" ", strip=True)
+        raw_txt = el.get_text(separator=" ", strip=True)
+        if has_inline_read_more(raw_txt):
+            continue
+        txt = raw_txt
         txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
         txt = sanitize_extracted_text(txt)
 
@@ -591,8 +660,20 @@ def normalize_for_match(text: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
+def normalize_quote_style(text: str) -> str:
+    return (text or "").translate(str.maketrans({
+        "“": '"',
+        "”": '"',
+        "„": '"',
+        "‟": '"',
+        "‘": "'",
+        "’": "'",
+        "‚": "'",
+        "‛": "'",
+    }))
+
 def normalize_for_equality(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip())
+    return re.sub(r"\s+", " ", normalize_quote_style((text or "").strip()))
 
 def is_noop_reason(reason: str) -> bool:
     lower = (reason or "").strip().lower()
@@ -818,20 +899,15 @@ def classify_language_issue(original, corrected, reason):
         return "spelling"
     return "grammar"
 
-def tokenize_with_spaces(text: str):
-    return re.findall(r"\s+|[^\s]+", text or "")
-
 def highlight_diff_pair(original: str, corrected: str):
-    original_tokens = tokenize_with_spaces(original)
-    corrected_tokens = tokenize_with_spaces(corrected)
-    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens)
+    matcher = SequenceMatcher(a=original or "", b=corrected or "")
 
     original_parts = []
     corrected_parts = []
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        original_chunk = "".join(original_tokens[i1:i2])
-        corrected_chunk = "".join(corrected_tokens[j1:j2])
+        original_chunk = (original or "")[i1:i2]
+        corrected_chunk = (corrected or "")[j1:j2]
 
         if tag == "equal":
             original_parts.append(html.escape(original_chunk))
@@ -1127,7 +1203,7 @@ def filter_editorial_rows(raw_table, article_text):
 # =================================================
 # GEMINI GRAMMAR QC (PARAGRAPH PASS)
 # =================================================
-def gemini_grammar_review(article_data):
+def gemini_grammar_review(article_data, source_context=""):
     raw_paragraphs = [
         text for ctype, text in article_data
         if (ctype in {"paragraph", "table"})
@@ -1144,6 +1220,7 @@ def gemini_grammar_review(article_data):
         if rules_text else
         "\nOptional preferred spellings: (none provided)\n"
     )
+    source_style_notes = build_source_style_notes(source_context)
 
     BASE_PROMPT = f"""
 You are a professional Hindi editor and content QC reviewer.
@@ -1158,6 +1235,7 @@ Must-follow Hindi editorial rules:
 - Use the Hindi danda "।" to end sentences (not a period).
 - Use double quotes for direct speech and official statements.
 - Use single quotes for titles (books, films, shows, programs, named schemes).
+- Straight and curly variants of the same quote type are both acceptable; do not flag quote-shape-only swaps such as "..." vs “...”.
 - This publication style does not use chandrabindu in normal spellings where the house style prefers anusvara or the non-chandrabindu form; for example, prefer "पांच" over "पाँच".
 - Do not introduce chandrabindu in corrected text unless it is unquestionably required by the publication style.
 - For established loanwords that conventionally use the "ऑ" sound, prefer the standard spelling with "ऑ" (for example, "कॉपी", "कॉफी", "कॉलेज") instead of forms like "कापी", "काफी", "कालेज".
@@ -1172,6 +1250,7 @@ Must-follow Hindi editorial rules:
 - Do not use honorifics श्री/श्रीमती for any person name (only "महामहिम" for the President when needed).
 
 {rules_block}
+{source_style_notes}
 
 Guidance:
 - The preferred spellings list is optional and incomplete. Use it as hints only.
@@ -1253,7 +1332,7 @@ TEXT:
 # =================================================
 # GEMINI EDITORIAL QC (HINDI GUIDELINES)
 # =================================================
-def gemini_editorial_review_hi(article_data):
+def gemini_editorial_review_hi(article_data, source_context=""):
     paragraphs = [
         text[:900]
         for ctype, text in article_data
@@ -1261,6 +1340,7 @@ def gemini_editorial_review_hi(article_data):
     ]
     if not paragraphs:
         return ""
+    source_style_notes = build_source_style_notes(source_context)
 
     base_prompt = """
 You are an editorial QC reviewer for Hindi content.
@@ -1269,6 +1349,7 @@ Use English for Issue and Corrected Text. Keep fixes concise and specific.
 Check for clear violations of these Hindi editorial rules:
 - Use the Hindi danda "।" to end sentences (not a period).
 - Use double quotes for direct speech; single quotes for titles.
+- Straight and curly variants of the same quote type are both acceptable; do not flag quote-shape-only swaps such as "..." vs “...”.
 - This publication style avoids chandrabindu in normal house-style spellings; prefer forms like "पांच" over "पाँच".
 - For established loanwords with the "ऑ" sound, prefer standard spellings like "कॉपी", "कॉफी", and "कॉलेज" over plain "का/काॅ/का" forms when the correction is unambiguous.
 - Flag first-mention abbreviation issues only for named entities or terms that are genuinely unclear without expansion.
@@ -1279,6 +1360,12 @@ Check for clear violations of these Hindi editorial rules:
 - Do not use honorifics श्री/श्रीमती for names (only "महामहिम" for the President when needed).
 - Do not enforce subjective style swaps, blanket comma preferences, or bans on sentence openings like "लेकिन"/"और".
 - Do not translate acceptable English technical terms just to create a correction.
+"""
+
+    if source_style_notes:
+        base_prompt += "\n" + source_style_notes.strip() + "\n"
+
+    base_prompt += """
 
 Rules for output:
 - Excerpt must be an exact substring from the TEXT.
@@ -1298,11 +1385,17 @@ You are a strict Hindi editorial QC reviewer. This is a focused recall pass.
 Use English for Issue and Corrected Text.
 
 Check only these categories, but identify all applicable issues from the paragraph:
-- wrong quote style for direct speech
+- wrong quote type for direct speech (for example, single quotes instead of double quotes), but do not flag straight-vs-curly quote-shape differences
 - sentence-ending punctuation or bracket spacing errors
 - house-style orthography issues where chandrabindu should not be used
 - established loanword spellings that clearly need the "ऑ" form
 - abbreviation/acronym used before full form at first mention only when the abbreviation refers to a named entity and expansion is required for clarity
+"""
+
+    if source_style_notes:
+        focused_prompt += "\n" + source_style_notes.strip() + "\n"
+
+    focused_prompt += """
 
 Rules for output:
 - Excerpt must be an exact substring from the TEXT.
@@ -1389,8 +1482,8 @@ def article_hash(article_data):
     joined = "\n".join(t for _, t in article_data)
     return hashlib.md5(joined.encode("utf-8")).hexdigest()
 
-def analysis_snapshot_key(article_data):
-    return f"{PROMPT_VERSION_HI}:{article_hash(article_data)}"
+def analysis_snapshot_key(article_data, source_context=""):
+    return f"{PROMPT_VERSION_HI}:{get_domain(source_context)}:{article_hash(article_data)}"
 
 def load_persistent_analysis_cache():
     try:
@@ -1409,13 +1502,13 @@ def save_persistent_analysis_cache(cache):
     except Exception:
         pass
 
-def load_analysis_snapshot(article_data):
+def load_analysis_snapshot(article_data, source_context=""):
     cache = load_persistent_analysis_cache()
-    return cache.get(analysis_snapshot_key(article_data))
+    return cache.get(analysis_snapshot_key(article_data, source_context))
 
-def save_analysis_snapshot(article_data, snapshot):
+def save_analysis_snapshot(article_data, snapshot, source_context=""):
     cache = load_persistent_analysis_cache()
-    cache[analysis_snapshot_key(article_data)] = snapshot
+    cache[analysis_snapshot_key(article_data, source_context)] = snapshot
     save_persistent_analysis_cache(cache)
 
 def chunked(lst, size):
@@ -1512,12 +1605,12 @@ STATEMENTS:
     return result
 
 @st.cache_data(show_spinner=False)
-def cached_gemini_grammar_review(article_data):
-    return gemini_grammar_review(article_data)
+def cached_gemini_grammar_review(article_data, source_context=""):
+    return gemini_grammar_review(article_data, source_context)
 
 @st.cache_data(show_spinner=False)
-def cached_gemini_editorial_review_hi(article_data):
-    return gemini_editorial_review_hi(article_data)
+def cached_gemini_editorial_review_hi(article_data, source_context=""):
+    return gemini_editorial_review_hi(article_data, source_context)
 
 @st.cache_data(show_spinner=False)
 def cached_gemini_fact_check(article_data):
@@ -1537,20 +1630,23 @@ source = st.sidebar.radio("Source", ["URL", "DOCX"])
 analyze_clicked = st.sidebar.button("Analyze")
 if st.sidebar.button("Clear cached AI outputs"):
     st.cache_data.clear()
-    for key in ("article_content", "input_key"):
+    for key in ("article_content", "input_key", "source_context"):
         st.session_state.pop(key, None)
 
 article_content = None
 current_key = None
+source_context = ""
 
 if source == "URL":
     url = st.sidebar.text_input("Hindi Article URL")
     if url:
         current_key = f"url:{url.strip()}"
+        source_context = url.strip()
     if analyze_clicked and url:
         article_content = clean_article(url)
         st.session_state["article_content"] = article_content
         st.session_state["input_key"] = current_key
+        st.session_state["source_context"] = source_context
 else:
     uploaded = st.sidebar.file_uploader("Upload DOCX", type=["docx"])
     if uploaded:
@@ -1562,10 +1658,12 @@ else:
                 article_content = clean_docx(f.name)
             st.session_state["article_content"] = article_content
             st.session_state["input_key"] = current_key
+            st.session_state["source_context"] = ""
 
 if article_content is None:
     if current_key and st.session_state.get("input_key") == current_key:
         article_content = st.session_state.get("article_content")
+        source_context = st.session_state.get("source_context", source_context)
 
 if article_content:
     qc_content = run_pipeline(article_content)
@@ -1582,14 +1680,14 @@ if article_content:
         t for c, t in article_content if c in {"paragraph", "table"}
     )
 
-    snapshot = load_analysis_snapshot(qc_content)
+    snapshot = load_analysis_snapshot(qc_content, source_context)
     if snapshot:
         raw = snapshot.get("grammar_raw", "")
         editorial_raw = snapshot.get("editorial_raw", "")
         fact_result = snapshot.get("fact_result", "")
     else:
-        raw = cached_gemini_grammar_review(qc_content)
-        editorial_raw = cached_gemini_editorial_review_hi(qc_content)
+        raw = cached_gemini_grammar_review(qc_content, source_context)
+        editorial_raw = cached_gemini_editorial_review_hi(qc_content, source_context)
         fact_result = cached_gemini_fact_check(qc_content)
         save_analysis_snapshot(
             qc_content,
@@ -1598,6 +1696,7 @@ if article_content:
                 "editorial_raw": editorial_raw,
                 "fact_result": fact_result,
             },
+            source_context,
         )
 
     clean = filter_gemini_rows(raw, article_text)
