@@ -25,9 +25,12 @@ import base64
 import requests
 import hashlib
 import tempfile
+import html
 import streamlit as st
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
+from difflib import SequenceMatcher
+from urllib.parse import urlparse
 
 # =================================================
 # GEN AI CLIENT
@@ -51,7 +54,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-24-1"
+PROMPT_VERSION_HI = "2026-03-25-1"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -150,6 +153,94 @@ NAVIGATION_TOKENS = {
     "जॉब्स", "कैरियर", "वायरल", "स्पेशल", "वेब स्टोरी", "जागरण इमर्सिव",
 }
 
+ARTICLE_ROOT_SELECTORS = [
+    "article",
+    "[itemprop='articleBody']",
+    ".article-content",
+    ".article-body",
+    ".articleBody",
+    ".story-content",
+    ".storyBody",
+    ".entry-content",
+    ".post-content",
+    ".content-text",
+    ".detail-content",
+    ".description",
+]
+
+DOMAIN_ARTICLE_SELECTORS = {
+    "herzindagi.com": [
+        "[itemprop='articleBody']",
+        "article",
+        ".article-content",
+        ".story-content",
+        ".entry-content",
+        ".post-content",
+        ".description",
+    ],
+    "www.herzindagi.com": [
+        "[itemprop='articleBody']",
+        "article",
+        ".article-content",
+        ".story-content",
+        ".entry-content",
+        ".post-content",
+        ".description",
+    ],
+    "onlymyhealth.com": [
+        "[itemprop='articleBody']",
+        "article",
+        ".article-content",
+        ".story-content",
+        ".entry-content",
+        ".post-content",
+        ".description",
+    ],
+    "www.onlymyhealth.com": [
+        "[itemprop='articleBody']",
+        "article",
+        ".article-content",
+        ".story-content",
+        ".entry-content",
+        ".post-content",
+        ".description",
+    ],
+}
+
+EXCLUDED_SUBTREE_SELECTORS = [
+    "script",
+    "style",
+    "noscript",
+    "form",
+    "nav",
+    "footer",
+    "aside",
+    "header",
+    ".breadcrumb",
+    ".breadcrumbs",
+    ".social-share",
+    ".share",
+    ".author",
+    ".byline",
+    ".updated",
+    ".publish-info",
+    ".highlights",
+    ".highlight",
+    ".keypoints",
+    ".key-points",
+    ".related",
+    ".recommended",
+    ".read-more",
+    ".also-read",
+    ".also_read",
+    ".you-may-like",
+    ".trending",
+    ".copyright",
+    ".footer",
+    ".ad",
+    ".ads",
+]
+
 def is_navigation_blob(text: str) -> bool:
     compact = re.sub(r"\s+", " ", text.strip().lower())
     if len(compact) > 180:
@@ -158,11 +249,35 @@ def is_navigation_blob(text: str) -> bool:
     token_hits = sum(1 for token in NAVIGATION_TOKENS if token in compact)
     return token_hits >= 5
 
+def is_probable_metadata_line(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", (text or "").strip())
+    lower = compact.lower()
+
+    if not compact:
+        return True
+    if re.match(r"^https?://", compact):
+        return True
+    if "www." in lower and lower.endswith(".html"):
+        return True
+    if lower in {"highlights", "highlight", "हाइलाइट्स"}:
+        return True
+    if lower.startswith("by ") or lower.startswith("edited by"):
+        return True
+    if "edited by:" in lower or lower.startswith("updated:") or lower.startswith("published:"):
+        return True
+    if "all rights reserved" in lower or "copyright" in lower:
+        return True
+    if "jagran new media" in lower:
+        return True
+    return False
+
 def should_skip_extracted_text(text: str) -> bool:
     compact = re.sub(r"\s+", " ", text.strip())
     lower = compact.lower()
 
     if not compact:
+        return True
+    if is_probable_metadata_line(compact):
         return True
     if lower.startswith("यह भी पढ़ें"):
         return True
@@ -177,8 +292,134 @@ def sanitize_extracted_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
     cleaned = re.sub(r"\s*\.{0,3}\s*और पढ़ें\s*$", "", cleaned)
     cleaned = re.sub(r"\s*यह भी पढ़ें[:：].*$", "", cleaned)
+    cleaned = re.sub(r"\s*copyright\s+.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*all rights reserved\s*.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+def get_domain(url: str) -> str:
+    return (urlparse(url).netloc or "").lower()
+
+def is_sufficient_article_body(content) -> bool:
+    paragraphs = [text for ctype, text in content if ctype == "paragraph"]
+    total_chars = sum(len(text) for text in paragraphs)
+    return len(paragraphs) >= 2 and total_chars >= 250
+
+def extend_content_from_container(container, content, seen):
+    clone = BeautifulSoup(str(container), "html.parser")
+    for node in clone.select(",".join(EXCLUDED_SUBTREE_SELECTORS)):
+        node.decompose()
+
+    extracted_any = False
+
+    for el in clone.find_all(["p", "li"], recursive=True):
+        txt = el.get_text(separator=" ", strip=True)
+        txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
+        txt = sanitize_extracted_text(txt)
+        if not txt or len(txt) < 20:
+            continue
+        if should_skip_extracted_text(txt):
+            continue
+        if txt in seen:
+            continue
+        seen.add(txt)
+        content.append(("paragraph", txt))
+        extracted_any = True
+
+    for table in clone.find_all("table"):
+        for tr in table.find_all("tr"):
+            cells = [
+                c.get_text(separator=" ", strip=True)
+                for c in tr.find_all(["th", "td"])
+            ]
+            cells = [re.sub(r"\s+", " ", c).strip() for c in cells if c.strip()]
+            if not cells:
+                continue
+            row_text = sanitize_extracted_text(" | ".join(cells))
+            if len(row_text) < 5:
+                continue
+            if should_skip_extracted_text(row_text):
+                continue
+            if row_text in seen:
+                continue
+            seen.add(row_text)
+            content.append(("table", row_text))
+            extracted_any = True
+
+    if extracted_any:
+        return
+
+    fallback_text = sanitize_extracted_text(clone.get_text(separator="\n", strip=True))
+    for para in re.split(r"\n+", fallback_text):
+        para = sanitize_extracted_text(para)
+        if len(para) < 20:
+            continue
+        if should_skip_extracted_text(para):
+            continue
+        if para in seen:
+            continue
+        seen.add(para)
+        content.append(("paragraph", para))
+
+def extract_from_article_roots(soup, url, content, seen):
+    roots = []
+    selectors = DOMAIN_ARTICLE_SELECTORS.get(get_domain(url), []) + ARTICLE_ROOT_SELECTORS
+
+    for selector in selectors:
+        for node in soup.select(selector):
+            text = sanitize_extracted_text(node.get_text(separator=" ", strip=True))
+            if len(text) < 150:
+                continue
+            roots.append(node)
+
+    if not roots:
+        return
+
+    ordered = []
+    for node in roots:
+        if any(node in existing.descendants for existing in ordered):
+            continue
+        ordered.append(node)
+
+    for node in ordered:
+        extend_content_from_container(node, content, seen)
+
+def extract_from_json_article_body(soup, content, seen):
+    body_texts = []
+
+    def extract_article_body(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in {"articleBody", "text", "description"} and isinstance(v, str):
+                    if len(v) > 80:
+                        body_texts.append(v)
+                else:
+                    extract_article_body(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                extract_article_body(item)
+
+    for script in soup.find_all("script", {"type": "application/ld+json"}):
+        if not script.string:
+            continue
+        try:
+            data = json.loads(script.string)
+            extract_article_body(data)
+        except Exception:
+            continue
+
+    for body in body_texts:
+        cleaned = BeautifulSoup(body, "html.parser").get_text(separator="\n", strip=True)
+        for para in re.split(r"\n+|\\n+", cleaned):
+            para = sanitize_extracted_text(para)
+            if len(para) < 20:
+                continue
+            if should_skip_extracted_text(para):
+                continue
+            if para in seen:
+                continue
+            seen.add(para)
+            content.append(("paragraph", para))
 
 # =================================================
 # INPUT EXTRACTION (UNCHANGED STRUCTURE)
@@ -235,6 +476,16 @@ def clean_article(url):
     if h1:
         content.append(("heading", h1.get_text(strip=True)))
 
+    structured_content = []
+    extract_from_article_roots(soup, url, structured_content, set())
+    if is_sufficient_article_body(structured_content):
+        return content + structured_content
+
+    json_content = []
+    extract_from_json_article_body(soup, json_content, set())
+    if is_sufficient_article_body(json_content):
+        return content + json_content
+
     for el in soup.find_all(["p", "li"], recursive=True):
         txt = el.get_text(separator=" ", strip=True)
         txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
@@ -250,7 +501,6 @@ def clean_article(url):
         seen.add(txt)
         content.append(("paragraph", txt))
 
-    # Extract HTML tables (if any)
     for table in soup.find_all("table"):
         for tr in table.find_all("tr"):
             cells = [
@@ -270,54 +520,8 @@ def clean_article(url):
             seen.add(row_text)
             content.append(("table", row_text))
 
-    # Fallback: try JSON-embedded article body when HTML is sparse
     if len(content) < 3:
-        body_texts = []
-
-        def extract_article_body(obj):
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    if k in {"articleBody", "text"} and isinstance(v, str):
-                        if len(v) > 80:
-                            body_texts.append(v)
-                    else:
-                        extract_article_body(v)
-            elif isinstance(obj, list):
-                for item in obj:
-                    extract_article_body(item)
-
-        # Parse LD+JSON blocks
-        for script in soup.find_all("script", {"type": "application/ld+json"}):
-            if not script.string:
-                continue
-            try:
-                data = json.loads(script.string)
-                extract_article_body(data)
-            except Exception:
-                continue
-
-        # Regex fallback for embedded JSON
-        if not body_texts:
-            raw = soup.get_text(separator=" ", strip=True)
-            m = re.search(r"articleBody\"\\s*:\\s*\"(.*?)\"", raw)
-            if m:
-                try:
-                    body_texts.append(json.loads(f"\"{m.group(1)}\""))
-                except Exception:
-                    pass
-
-        for body in body_texts:
-            cleaned = BeautifulSoup(body, "html.parser").get_text(separator=" ", strip=True)
-            for para in re.split(r"\n+|\\n+", cleaned):
-                para = sanitize_extracted_text(para)
-                if len(para) < 20:
-                    continue
-                if should_skip_extracted_text(para):
-                    continue
-                if para in seen:
-                    continue
-                seen.add(para)
-                content.append(("paragraph", para))
+        extract_from_json_article_body(soup, content, seen)
 
     return content
 
@@ -403,6 +607,18 @@ def is_noop_reason(reason: str) -> bool:
 
 def is_noop_correction(original: str, corrected: str) -> bool:
     return normalize_for_equality(original) == normalize_for_equality(corrected)
+
+def is_ignored_styleguide_issue(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    markers = (
+        "chandra",
+        "anusvara",
+        "चंद्रबिंदु",
+        "चन्द्रबिन्दु",
+        "अनुस्वार",
+        "चांद्रबिंदु",
+    )
+    return any(marker in lower for marker in markers)
 
 def should_project_editorial_to_language(issue: str) -> bool:
     lower = (issue or "").strip().lower()
@@ -566,6 +782,8 @@ def filter_gemini_rows(raw_table, article_text):
             continue
         if is_noop_reason(reason) or is_noop_correction(original, corrected):
             continue
+        if is_ignored_styleguide_issue(reason):
+            continue
 
         if normalize_for_match(original) in norm_article:
             if not header_added:
@@ -586,6 +804,105 @@ def is_hindi_spelling_issue(original, corrected):
         original != corrected
     )
 
+def is_spelling_reason(reason: str) -> bool:
+    lower = (reason or "").strip().lower()
+    return any(marker in lower for marker in (
+        "वर्तनी",
+        "spelling",
+        "typo",
+        "misspelling",
+    ))
+
+def classify_language_issue(original, corrected, reason):
+    if is_spelling_reason(reason):
+        return "spelling"
+    if is_hindi_spelling_issue(original, corrected):
+        return "spelling"
+    return "grammar"
+
+def tokenize_with_spaces(text: str):
+    return re.findall(r"\s+|[^\s]+", text or "")
+
+def highlight_diff_pair(original: str, corrected: str):
+    original_tokens = tokenize_with_spaces(original)
+    corrected_tokens = tokenize_with_spaces(corrected)
+    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens)
+
+    original_parts = []
+    corrected_parts = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        original_chunk = "".join(original_tokens[i1:i2])
+        corrected_chunk = "".join(corrected_tokens[j1:j2])
+
+        if tag == "equal":
+            original_parts.append(html.escape(original_chunk))
+            corrected_parts.append(html.escape(corrected_chunk))
+            continue
+
+        if original_chunk:
+            original_parts.append(
+                f'<span class="qc-diff qc-diff-original">{html.escape(original_chunk)}</span>'
+            )
+        if corrected_chunk:
+            corrected_parts.append(
+                f'<span class="qc-diff qc-diff-corrected">{html.escape(corrected_chunk)}</span>'
+            )
+
+    return "".join(original_parts), "".join(corrected_parts)
+
+def render_language_table(rows):
+    if not rows:
+        return ""
+
+    lines = [
+        """
+<style>
+.qc-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+}
+.qc-table th, .qc-table td {
+  border: 1px solid rgba(250,250,250,0.14);
+  padding: 0.75rem 0.9rem;
+  vertical-align: top;
+  text-align: left;
+}
+.qc-table .qc-diff-original {
+  color: #ff6b6b;
+  font-weight: 700;
+}
+.qc-table .qc-diff-corrected {
+  color: #4ade80;
+  font-weight: 700;
+}
+</style>
+<table class="qc-table">
+  <thead>
+    <tr>
+      <th>Original</th>
+      <th>Corrected</th>
+      <th>Reason</th>
+    </tr>
+  </thead>
+  <tbody>
+        """.strip()
+    ]
+
+    for original, corrected, reason in rows:
+        original_html, corrected_html = highlight_diff_pair(original, corrected)
+        lines.append(
+            "<tr>"
+            f"<td>{original_html}</td>"
+            f"<td>{corrected_html}</td>"
+            f"<td>{html.escape(reason)}</td>"
+            "</tr>"
+        )
+
+    lines.append("</tbody></table>")
+    return "\n".join(lines)
+
 def split_spelling_grammar_hi(table_md):
     spelling_rows = []
     grammar_rows = []
@@ -604,23 +921,15 @@ def split_spelling_grammar_hi(table_md):
             continue
         if is_noop_reason(reason) or is_noop_correction(o, c):
             continue
+        if is_ignored_styleguide_issue(reason):
+            continue
 
-        row = f"| {o} | {c} | {reason} |"
-
-        if is_hindi_spelling_issue(o, c):
-            spelling_rows.append(row)
+        if classify_language_issue(o, c, reason) == "spelling":
+            spelling_rows.append((o, c, reason))
         else:
-            grammar_rows.append(row)
+            grammar_rows.append((o, c, reason))
 
-    def build(rows):
-        if not rows:
-            return ""
-        return "\n".join(
-            ["| Original | Corrected | Reason |",
-             "|---|---|---|"] + rows
-        )
-
-    return build(spelling_rows), build(grammar_rows)
+    return spelling_rows, grammar_rows
 
 def parse_language_rows(table_md, article_data=None):
     rows = []
@@ -638,6 +947,8 @@ def parse_language_rows(table_md, article_data=None):
             continue
         if is_noop_reason(reason) or is_noop_correction(original, corrected):
             continue
+        if is_ignored_styleguide_issue(reason):
+            continue
 
         key = (canon_hi(original), canon_hi(corrected), canon_hi(reason))
         if key in seen:
@@ -654,6 +965,8 @@ def parse_language_rows(table_md, article_data=None):
                 article_data, original, corrected, reason
             )
         if is_noop_reason(reason) or is_noop_correction(original, corrected):
+            continue
+        if is_ignored_styleguide_issue(reason):
             continue
         rows.append((original, corrected, reason))
 
@@ -685,11 +998,15 @@ def parse_editorial_rows(editorial_md, article_data=None):
         )
         if is_noop_reason(issue) or is_noop_correction(excerpt, corrected):
             continue
+        if is_ignored_styleguide_issue(issue):
+            continue
         if article_data:
             excerpt, corrected, _ = expand_language_row_context(
                 article_data, excerpt, corrected, issue
             )
         if is_noop_reason(issue) or is_noop_correction(excerpt, corrected):
+            continue
+        if is_ignored_styleguide_issue(issue):
             continue
 
         key = (canon_hi(issue), canon_hi(location), canon_hi(excerpt), canon_hi(corrected))
@@ -740,28 +1057,22 @@ def build_language_tables(language_rows, editorial_rows=None):
             continue
         if is_noop_reason(reason) or is_noop_correction(original, corrected):
             continue
+        if is_ignored_styleguide_issue(reason):
+            continue
 
         key = (canon_hi(original), canon_hi(corrected), canon_hi(reason))
         if key in seen:
             continue
 
         seen.add(key)
-        row = f"| {original} | {corrected} | {reason} |"
+        row = (original, corrected, reason)
 
-        if is_hindi_spelling_issue(original, corrected):
+        if classify_language_issue(original, corrected, reason) == "spelling":
             spelling_rows.append(row)
         else:
             grammar_rows.append(row)
 
-    def build(rows):
-        if not rows:
-            return ""
-        return "\n".join(
-            ["| Original | Corrected | Reason |",
-             "|---|---|---|"] + rows
-        )
-
-    return build(spelling_rows), build(grammar_rows)
+    return spelling_rows, grammar_rows
 
 # =================================================
 # EDITORIAL ROW FILTER (HINDI)
@@ -803,6 +1114,8 @@ def filter_editorial_rows(raw_table, article_text):
 
         # Corrected must be different from excerpt (after trimming)
         if is_noop_reason(issue) or is_noop_correction(excerpt, corrected):
+            continue
+        if is_ignored_styleguide_issue(issue):
             continue
 
         if not header_added:
@@ -1296,13 +1609,13 @@ if article_content:
 
     st.markdown("### ✍️ Spelling Issues")
     if spelling_table:
-        st.markdown(spelling_table)
+        st.markdown(render_language_table(spelling_table), unsafe_allow_html=True)
     else:
         st.success("✅ No spelling issues found")
 
     st.markdown("### 🧠 Grammar Issues")
     if grammar_table:
-        st.markdown(grammar_table)
+        st.markdown(render_language_table(grammar_table), unsafe_allow_html=True)
     else:
         st.success("✅ No grammar issues found")
 
