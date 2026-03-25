@@ -983,17 +983,58 @@ def split_grapheme_like_units(text: str):
 
     return units
 
+def classify_diff_unit(unit: str) -> str:
+    if not unit:
+        return "other"
+    if unit.isspace():
+        return "space"
+
+    first = unit[0]
+    category = unicodedata.category(first)
+    if category[0] in {"L", "M", "N"}:
+        return "word"
+
+    return "punct"
+
+def tokenize_for_diff(text: str):
+    tokens = []
+    current = []
+    current_kind = None
+
+    for unit in split_grapheme_like_units(text or ""):
+        kind = classify_diff_unit(unit)
+
+        if kind == "punct":
+            if current:
+                tokens.append("".join(current))
+                current = []
+                current_kind = None
+            tokens.append(unit)
+            continue
+
+        if current and kind != current_kind:
+            tokens.append("".join(current))
+            current = []
+
+        current.append(unit)
+        current_kind = kind
+
+    if current:
+        tokens.append("".join(current))
+
+    return tokens
+
 def highlight_diff_pair(original: str, corrected: str):
-    original_units = split_grapheme_like_units(original or "")
-    corrected_units = split_grapheme_like_units(corrected or "")
-    matcher = SequenceMatcher(a=original_units, b=corrected_units)
+    original_tokens = tokenize_for_diff(original or "")
+    corrected_tokens = tokenize_for_diff(corrected or "")
+    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens)
 
     original_parts = []
     corrected_parts = []
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        original_chunk = "".join(original_units[i1:i2])
-        corrected_chunk = "".join(corrected_units[j1:j2])
+        original_chunk = "".join(original_tokens[i1:i2])
+        corrected_chunk = "".join(corrected_tokens[j1:j2])
 
         if tag == "equal":
             original_parts.append(html.escape(original_chunk))
