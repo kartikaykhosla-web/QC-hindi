@@ -54,7 +54,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-25-1"
+PROMPT_VERSION_HI = "2026-03-25-2"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -611,12 +611,10 @@ def is_noop_correction(original: str, corrected: str) -> bool:
 def is_ignored_styleguide_issue(text: str) -> bool:
     lower = (text or "").strip().lower()
     markers = (
-        "chandra",
-        "anusvara",
-        "चंद्रबिंदु",
-        "चन्द्रबिन्दु",
-        "अनुस्वार",
-        "चांद्रबिंदु",
+        "prefer chandra-bindu",
+        "use chandra-bindu",
+        "चंद्रबिंदु का प्रयोग करें",
+        "चन्द्रबिन्दु का प्रयोग करें",
     )
     return any(marker in lower for marker in markers)
 
@@ -1160,6 +1158,9 @@ Must-follow Hindi editorial rules:
 - Use the Hindi danda "।" to end sentences (not a period).
 - Use double quotes for direct speech and official statements.
 - Use single quotes for titles (books, films, shows, programs, named schemes).
+- This publication style does not use chandrabindu in normal spellings where the house style prefers anusvara or the non-chandrabindu form; for example, prefer "पांच" over "पाँच".
+- Do not introduce chandrabindu in corrected text unless it is unquestionably required by the publication style.
+- For established loanwords that conventionally use the "ऑ" sound, prefer the standard spelling with "ऑ" (for example, "कॉपी", "कॉफी", "कॉलेज") instead of forms like "कापी", "काफी", "कालेज".
 - Flag first-mention abbreviation issues only when the short form refers to a named entity
   (such as an organisation, authority, institution, political party, law, scheme, or court)
   and the expansion is genuinely needed for clarity.
@@ -1179,6 +1180,7 @@ Guidance:
   without expansion in that article context.
 - Do not stop after finding the first issue in a paragraph.
 - Identify all clear issues in the paragraph, including quote misuse, punctuation, spacing, wording, and abbreviation-introduction problems.
+- Apply the house orthography consistently: avoid chandrabindu-style spellings in normal words when the house style prefers non-chandrabindu forms, and preserve standard "ऑ" loanword spellings where clearly appropriate.
 - Do not enforce subjective style preferences such as replacing acceptable loanwords,
   banning sentence openings like "लेकिन", or mandating commas after specific discourse markers.
 - Do not translate acceptable English technical terms into Hindi just to make a correction.
@@ -1267,6 +1269,8 @@ Use English for Issue and Corrected Text. Keep fixes concise and specific.
 Check for clear violations of these Hindi editorial rules:
 - Use the Hindi danda "।" to end sentences (not a period).
 - Use double quotes for direct speech; single quotes for titles.
+- This publication style avoids chandrabindu in normal house-style spellings; prefer forms like "पांच" over "पाँच".
+- For established loanwords with the "ऑ" sound, prefer standard spellings like "कॉपी", "कॉफी", and "कॉलेज" over plain "का/काॅ/का" forms when the correction is unambiguous.
 - Flag first-mention abbreviation issues only for named entities or terms that are genuinely unclear without expansion.
 - Do not force expansion of common technical abbreviations, scientific labels, measurements, or UI labels.
 - If a headline/subheading contains क्या/कैसे/क्यों/कब/कितना, it must end with "?".
@@ -1296,6 +1300,8 @@ Use English for Issue and Corrected Text.
 Check only these categories, but identify all applicable issues from the paragraph:
 - wrong quote style for direct speech
 - sentence-ending punctuation or bracket spacing errors
+- house-style orthography issues where chandrabindu should not be used
+- established loanword spellings that clearly need the "ऑ" form
 - abbreviation/acronym used before full form at first mention only when the abbreviation refers to a named entity and expansion is required for clarity
 
 Rules for output:
