@@ -55,7 +55,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-25-6"
+PROMPT_VERSION_HI = "2026-03-27-1"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -147,6 +147,17 @@ def generate_text(prompt, generation_config=None, model_name=MODEL_FLASH):
         config=build_generate_config(generation_config),
     )
     return response.text or ""
+
+def format_ai_error(prefix: str, exc: Exception) -> str:
+    return f"__ERROR__:{prefix}: {type(exc).__name__}: {exc}"
+
+def is_ai_error_output(text: str) -> bool:
+    return (text or "").startswith("__ERROR__:")
+
+def snapshot_has_meaningful_output(snapshot: dict) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    return any((snapshot.get(key) or "").strip() for key in ("grammar_raw", "editorial_raw", "fact_result"))
 
 NAVIGATION_TOKENS = {
     "अन्य", "मनोरंजन", "लाइफस्टाइल", "टेक-ज्ञान", "ऑटो", "पॉलिटिक्स",
@@ -1420,6 +1431,7 @@ TEXT:
 """
 
     responses = []
+    last_error = None
 
     for para in raw_paragraphs:
         try:
@@ -1434,11 +1446,12 @@ TEXT:
                 },
             )
             responses.append(out)
-        except Exception:
+        except Exception as exc:
+            last_error = exc
             continue
 
     if not responses:
-        return ""
+        return format_ai_error("grammar", last_error or RuntimeError("No Gemini response"))
 
     raw = "\n".join(responses)
 
@@ -1554,6 +1567,7 @@ If there are no issues, return exactly one row:
 """
 
     responses = []
+    last_error = None
 
     for i, para in enumerate(paragraphs, start=1):
         for prompt_template in (base_prompt, focused_prompt):
@@ -1576,11 +1590,12 @@ If there are no issues, return exactly one row:
                         },
                     )
                 )
-            except Exception:
+            except Exception as exc:
+                last_error = exc
                 continue
 
     if not responses:
-        return ""
+        return format_ai_error("editorial", last_error or RuntimeError("No Gemini response"))
 
     return "\n".join(responses)
 
@@ -1647,12 +1662,24 @@ def save_persistent_analysis_cache(cache):
 
 def load_analysis_snapshot(article_data, source_context=""):
     cache = load_persistent_analysis_cache()
-    return cache.get(analysis_snapshot_key(article_data, source_context))
+    snapshot = cache.get(analysis_snapshot_key(article_data, source_context))
+    return snapshot if snapshot_has_meaningful_output(snapshot) else None
 
 def save_analysis_snapshot(article_data, snapshot, source_context=""):
+    if not snapshot_has_meaningful_output(snapshot):
+        return
     cache = load_persistent_analysis_cache()
     cache[analysis_snapshot_key(article_data, source_context)] = snapshot
     save_persistent_analysis_cache(cache)
+
+def clear_persistent_analysis_cache():
+    try:
+        os.remove(PERSISTENT_CACHE_PATH_HI)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    FACT_CACHE.clear()
 
 def chunked(lst, size):
     for i in range(0, len(lst), size):
@@ -1674,6 +1701,8 @@ def gemini_fact_check(article_data):
 
     rows = []
     seen = set()
+    had_success = False
+    last_error = None
 
     for batch in chunked(statements, 5):
         block = "\n".join(f"- {s}" for s in batch)
@@ -1708,7 +1737,9 @@ STATEMENTS:
                     "max_output_tokens": 512
                 },
             )
-        except Exception:
+            had_success = True
+        except Exception as exc:
+            last_error = exc
             continue
 
         matches = re.findall(
@@ -1736,6 +1767,9 @@ STATEMENTS:
         if len(seen) >= 10:
             break
 
+    if not rows and not had_success:
+        return format_ai_error("fact", last_error or RuntimeError("No Gemini response"))
+
     if not rows:
         return ""
 
@@ -1762,6 +1796,13 @@ def cached_gemini_fact_check(article_data):
 # =================================================
 # PIPELINE
 # =================================================
+
+def render_ai_error(section_label: str, value: str):
+    if is_ai_error_output(value):
+        st.error(f"{section_label}: {value.replace('__ERROR__:', '').strip()}")
+        return True
+    return False
+
 def run_pipeline(content):
     return content
 
@@ -1773,6 +1814,7 @@ source = st.sidebar.radio("Source", ["URL", "DOCX"])
 analyze_clicked = st.sidebar.button("Analyze")
 if st.sidebar.button("Clear cached AI outputs"):
     st.cache_data.clear()
+    clear_persistent_analysis_cache()
     for key in ("article_content", "input_key", "source_context"):
         st.session_state.pop(key, None)
 
@@ -1856,25 +1898,33 @@ if article_content:
     )
 
     st.markdown("### ✍️ Spelling Issues")
-    if spelling_table:
+    if render_ai_error("Spelling/Grammar AI", raw):
+        pass
+    elif spelling_table:
         st.markdown(render_language_table(spelling_table), unsafe_allow_html=True)
     else:
         st.success("✅ No spelling issues found")
 
     st.markdown("### 🧠 Grammar Issues")
-    if grammar_table:
+    if render_ai_error("Spelling/Grammar AI", raw):
+        pass
+    elif grammar_table:
         st.markdown(render_language_table(grammar_table), unsafe_allow_html=True)
     else:
         st.success("✅ No grammar issues found")
 
     st.markdown("### 🧠 Gemini Editorial Review")
-    if editorial_display:
+    if render_ai_error("Editorial AI", editorial_raw):
+        pass
+    elif editorial_display:
         st.markdown(editorial_display)
     else:
         st.success("✅ No editorial issues found")
 
     st.markdown("### 📌 Fact Check")
-    if not fact_result or "| Statement |" not in fact_result:
+    if render_ai_error("Fact-check AI", fact_result):
+        pass
+    elif not fact_result or "| Statement |" not in fact_result:
         st.success("✅ No factual issues found")
     else:
         st.markdown(fact_result)
