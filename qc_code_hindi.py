@@ -477,6 +477,18 @@ def load_hindi_rules():
     except Exception:
         return ""
 
+def load_hindi_rule_pairs():
+    pairs = []
+    for line in load_hindi_rules().splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "->" not in raw:
+            continue
+        wrong, correct = [part.strip() for part in raw.split("->", 1)]
+        if not wrong or not correct or wrong == correct:
+            continue
+        pairs.append((wrong, correct))
+    return pairs
+
 # =================================================
 # MODEL INIT (PARALLEL TO ENGLISH)
 # =================================================
@@ -1255,6 +1267,34 @@ def expand_language_row_context(article_data, original: str, corrected: str, rea
 
     return context, corrected_context, reason
 
+def rule_based_spelling_rows(article_data):
+    rows = []
+    seen = set()
+    for wrong, correct in load_hindi_rule_pairs():
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9\u0900-\u097F]){re.escape(wrong)}(?![A-Za-z0-9\u0900-\u097F])"
+        )
+        for ctype, text in article_data or []:
+            if ctype not in {"paragraph", "table"}:
+                continue
+            if wrong not in text:
+                continue
+
+            sentences = split_hindi_sentences(text) or [text]
+            for sentence in sentences:
+                if not pattern.search(sentence):
+                    continue
+
+                corrected_sentence = pattern.sub(correct, sentence, count=1)
+                reason = f"वर्तनी / house style: use '{correct}'"
+                key = (canon_hi(sentence), canon_hi(corrected_sentence), canon_hi(reason))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append((sentence.strip(), corrected_sentence.strip(), reason))
+
+    return rows
+
 def batch_hindi_texts(texts, max_chars=6000):
     batches = []
     current = []
@@ -1334,6 +1374,30 @@ def is_hindi_spelling_issue(original, corrected):
         original != corrected
     )
 
+def word_tokens_hi(text: str):
+    return re.findall(r"[A-Za-z0-9\u0900-\u097F]+", text or "")
+
+def changed_word_token_count(original: str, corrected: str) -> int:
+    original_tokens = [normalise_hi(token) for token in word_tokens_hi(original)]
+    corrected_tokens = [normalise_hi(token) for token in word_tokens_hi(corrected)]
+    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens)
+    changed = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        changed += max(i2 - i1, j2 - j1)
+    return changed
+
+def looks_like_sentence_level_spelling_change(original: str, corrected: str) -> bool:
+    original_tokens = word_tokens_hi(original)
+    corrected_tokens = word_tokens_hi(corrected)
+    if not original_tokens or not corrected_tokens:
+        return False
+    if abs(len(original_tokens) - len(corrected_tokens)) > 1:
+        return False
+    changed = changed_word_token_count(original, corrected)
+    return 1 <= changed <= 2
+
 def is_spelling_reason(reason: str) -> bool:
     lower = (reason or "").strip().lower()
     return any(marker in lower for marker in (
@@ -1341,12 +1405,24 @@ def is_spelling_reason(reason: str) -> bool:
         "spelling",
         "typo",
         "misspelling",
+        "orthography",
+        "matra",
+        "loanword",
+        "transliteration",
+        "चंद्रबिंदु",
+        "चन्द्रबिन्दु",
+        "anusvara",
+        "chandrabindu",
+        "house-style",
+        "preferred spelling",
     ))
 
 def classify_language_issue(original, corrected, reason):
     if is_spelling_reason(reason):
         return "spelling"
     if is_hindi_spelling_issue(original, corrected):
+        return "spelling"
+    if looks_like_sentence_level_spelling_change(original, corrected):
         return "spelling"
     return "grammar"
 
@@ -1789,6 +1865,7 @@ Must-follow Hindi editorial rules:
 Guidance:
 - The preferred spellings list is optional and incomplete. Use it as hints only.
 - Still detect and flag other spelling/grammar issues dynamically.
+- For word-level orthography, matra, chandrabindu, anusvara, or standard loanword-form corrections, treat the issue as a spelling issue and make the reason explicitly mention spelling/वर्तनी.
 - Treat first-mention abbreviation problems as valid issues only when the short form is unclear
   without expansion in that article context.
 - Do not stop after finding the first issue in a paragraph.
@@ -1908,6 +1985,7 @@ Rules for output:
 - Excerpt must be an exact substring from the TEXT.
 - Corrected Text must be the fixed version of Excerpt and must differ from Excerpt.
 - If the text already follows the rule, do not flag it.
+- For orthography / matra / chandrabindu / standard loanword-form fixes, describe the issue as spelling/वर्तनी, not grammar.
 - Do not stop after the first issue; identify all clear issues in the paragraph.
 
 Return output strictly as a markdown table with header:
@@ -2282,10 +2360,11 @@ if article_content:
     editorial_clean = filter_editorial_rows(editorial_raw, article_text)
     editorial_rows = parse_editorial_rows(editorial_clean, qc_content)
     editorial_language_rows = parse_editorial_as_language_rows(editorial_clean, qc_content)
+    rule_based_rows = rule_based_spelling_rows(qc_content)
     editorial_display = build_editorial_table(editorial_rows)
 
     spelling_table, grammar_table = build_language_tables(
-        language_rows,
+        language_rows + rule_based_rows,
         editorial_language_rows,
     )
 
