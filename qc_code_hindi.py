@@ -564,7 +564,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-30-1"
+PROMPT_VERSION_HI = "2026-03-30-2"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -851,6 +851,23 @@ def sanitize_extracted_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
+HOUSE_STYLE_NUKTA_REPLACEMENTS = {
+    "ज़्यादा": "ज्यादा",
+    "ज़रूरी": "जरूरी",
+    "बाज़ार": "बाजार",
+    "नज़र": "नजर",
+}
+
+def apply_house_style_text_sanitizer(text: str) -> str:
+    sanitized = text or ""
+    for wrong, correct in HOUSE_STYLE_NUKTA_REPLACEMENTS.items():
+        sanitized = re.sub(
+            rf"(?<![A-Za-z0-9\u0900-\u097F]){re.escape(wrong)}(?![A-Za-z0-9\u0900-\u097F])",
+            correct,
+            sanitized,
+        )
+    return sanitized
+
 def get_domain(url: str) -> str:
     return (urlparse(url).netloc or "").lower()
 
@@ -911,6 +928,25 @@ def extend_content_from_container(container, content, seen):
         node.decompose()
 
     extracted_any = False
+    seen_norms = {normalize_for_match(item) for item in seen}
+
+    def should_add_text_candidate(txt: str) -> bool:
+        norm_txt = normalize_for_match(txt)
+        if not norm_txt:
+            return False
+        for existing_norm in seen_norms:
+            if not existing_norm:
+                continue
+            if norm_txt == existing_norm or norm_txt in existing_norm or existing_norm in norm_txt:
+                return False
+        return True
+
+    def append_text(ctype: str, txt: str):
+        nonlocal extracted_any
+        seen.add(txt)
+        seen_norms.add(normalize_for_match(txt))
+        content.append((ctype, txt))
+        extracted_any = True
 
     for el in clone.find_all(["p", "li"], recursive=True):
         raw_txt = el.get_text(separator=" ", strip=True)
@@ -923,11 +959,9 @@ def extend_content_from_container(container, content, seen):
             continue
         if should_skip_extracted_text(txt):
             continue
-        if txt in seen:
+        if txt in seen or not should_add_text_candidate(txt):
             continue
-        seen.add(txt)
-        content.append(("paragraph", txt))
-        extracted_any = True
+        append_text("paragraph", txt)
 
     for table in clone.find_all("table"):
         for tr in table.find_all("tr"):
@@ -943,26 +977,21 @@ def extend_content_from_container(container, content, seen):
                 continue
             if should_skip_extracted_text(row_text):
                 continue
-            if row_text in seen:
+            if row_text in seen or not should_add_text_candidate(row_text):
                 continue
-            seen.add(row_text)
-            content.append(("table", row_text))
-            extracted_any = True
-
-    if extracted_any:
-        return
+            append_text("table", row_text)
 
     fallback_text = sanitize_extracted_text(clone.get_text(separator="\n", strip=True))
     for para in re.split(r"\n+", fallback_text):
         para = sanitize_extracted_text(para)
-        if len(para) < 20:
+        min_len = 8 if is_heading_like_hi(para) else 20
+        if len(para) < min_len:
             continue
         if should_skip_extracted_text(para):
             continue
-        if para in seen:
+        if para in seen or not should_add_text_candidate(para):
             continue
-        seen.add(para)
-        content.append(("paragraph", para))
+        append_text("paragraph", para)
 
 def extract_from_article_roots(soup, url, content, seen):
     roots = []
@@ -2056,10 +2085,12 @@ def parse_language_rows(table_md, article_data=None):
             corrected.strip(),
             reason.strip(),
         )
+        corrected = apply_house_style_text_sanitizer(corrected)
         if article_data:
             original, corrected, reason = expand_language_row_context(
                 article_data, original, corrected, reason
             )
+            corrected = apply_house_style_text_sanitizer(corrected)
         if should_skip_language_change(original, corrected, reason):
             continue
         rows.append((original, corrected, reason))
@@ -2090,12 +2121,14 @@ def parse_editorial_rows(editorial_md, article_data=None):
             excerpt.strip(),
             corrected.strip(),
         )
+        corrected = apply_house_style_text_sanitizer(corrected)
         if should_skip_language_change(excerpt, corrected, issue):
             continue
         if article_data:
             excerpt, corrected, _ = expand_language_row_context(
                 article_data, excerpt, corrected, issue
             )
+            corrected = apply_house_style_text_sanitizer(corrected)
         if should_skip_language_change(excerpt, corrected, issue):
             continue
 
