@@ -564,7 +564,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-30-3"
+PROMPT_VERSION_HI = "2026-03-30-4"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -1636,6 +1636,44 @@ def batch_hindi_texts(texts, max_chars=6000):
 
     return batches
 
+def segment_hindi_review_text(text: str, max_chars: int = 520):
+    cleaned = sanitize_extracted_text(text)
+    if not cleaned:
+        return []
+    if len(cleaned) <= max_chars:
+        return [cleaned]
+
+    sentences = split_hindi_sentences(cleaned)
+    if not sentences:
+        sentences = [cleaned]
+
+    segments = []
+    current = []
+    current_len = 0
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        sentence_len = len(sentence) + (1 if current else 0)
+
+        if current and current_len + sentence_len > max_chars:
+            segments.append(" ".join(current).strip())
+            current = [sentence]
+            current_len = len(sentence)
+            continue
+
+        current.append(sentence)
+        current_len += sentence_len
+
+    if current:
+        segments.append(" ".join(current).strip())
+
+    if segments:
+        return segments
+
+    return [cleaned]
+
 # =================================================
 # VERBATIM ROW FILTER (UNCHANGED LOGIC)
 # =================================================
@@ -2070,6 +2108,8 @@ def parse_language_rows(table_md, article_data=None):
     for original, corrected, reason in matches:
         if original.lower() == "original":
             continue
+        if all(re.fullmatch(r":?-{2,}:?", cell.strip()) for cell in (original, corrected, reason)):
+            continue
         if any(x.strip() in {"-", "--", "---"} for x in (original, corrected, reason)):
             continue
         if should_skip_language_change(original, corrected, reason):
@@ -2109,6 +2149,8 @@ def parse_editorial_rows(editorial_md, article_data=None):
     for issue, location, excerpt, corrected in matches:
         lower = [issue.lower(), location.lower(), excerpt.lower(), corrected.lower()]
         if lower == ["issue", "location", "excerpt", "corrected text"]:
+            continue
+        if all(re.fullmatch(r":?-{2,}:?", cell.strip()) for cell in (issue, location, excerpt, corrected)):
             continue
         if issue.lower() == "no issues found":
             continue
@@ -2249,11 +2291,15 @@ def filter_editorial_rows(raw_table, article_text):
 # GEMINI GRAMMAR QC (PARAGRAPH PASS)
 # =================================================
 def gemini_grammar_review(article_data, source_context=""):
-    raw_paragraphs = [
-        text for ctype, text in article_data
-        if (ctype in {"paragraph", "table"})
-        and (ctype != "paragraph" or not is_structural_line_hi(text))
-    ][:120]
+    raw_paragraphs = []
+    for ctype, text in article_data:
+        if ctype not in {"paragraph", "table"}:
+            continue
+        if ctype == "paragraph" and is_structural_line_hi(text):
+            continue
+        raw_paragraphs.extend(segment_hindi_review_text(text))
+
+    raw_paragraphs = raw_paragraphs[:180]
 
     if not raw_paragraphs:
         return ""
@@ -2428,11 +2474,11 @@ TEXT:
 # GEMINI EDITORIAL QC (HINDI GUIDELINES)
 # =================================================
 def gemini_editorial_review_hi(article_data, source_context=""):
-    paragraphs = [
-        text[:900]
-        for ctype, text in article_data
-        if ctype == "paragraph"
-    ]
+    paragraphs = []
+    for ctype, text in article_data:
+        if ctype != "paragraph":
+            continue
+        paragraphs.extend(segment_hindi_review_text(text, max_chars=700))
     if not paragraphs:
         return ""
     source_style_notes = build_source_style_notes(source_context)
