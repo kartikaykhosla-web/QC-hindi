@@ -564,7 +564,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-27-1"
+PROMPT_VERSION_HI = "2026-03-30-1"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -1080,15 +1080,11 @@ def clean_article(url):
         content.append(("heading", h1.get_text(strip=True)))
     add_meta_description_summary(soup, url, content, seen)
 
-    structured_content = []
-    extract_from_article_roots(soup, url, structured_content, set())
-    if is_sufficient_article_body(structured_content):
-        return content + structured_content
+    extract_from_article_roots(soup, url, content, seen)
+    extract_from_json_article_body(soup, content, seen)
 
-    json_content = []
-    extract_from_json_article_body(soup, json_content, set())
-    if is_sufficient_article_body(json_content):
-        return content + json_content
+    if is_sufficient_article_body(content):
+        return content
 
     for el in soup.find_all(["p", "li"], recursive=True):
         raw_txt = el.get_text(separator=" ", strip=True)
@@ -1210,8 +1206,26 @@ def normalize_quote_style(text: str) -> str:
         "‛": "'",
     }))
 
+NUKTA_STRIP_TRANSLATION = str.maketrans({
+    "क़": "क",
+    "ख़": "ख",
+    "ग़": "ग",
+    "ज़": "ज",
+    "ड़": "ड",
+    "ढ़": "ढ",
+    "फ़": "फ",
+    "य़": "य",
+    "ऩ": "न",
+    "ऱ": "र",
+    "ऴ": "ळ",
+})
+
 def strip_quote_chars(text: str) -> str:
     return re.sub(r"""["'“”‘’„‟‚‛]""", "", text or "")
+
+def strip_nukta_chars(text: str) -> str:
+    cleaned = (text or "").translate(NUKTA_STRIP_TRANSLATION)
+    return cleaned.replace("\u093c", "")
 
 def normalize_for_equality(text: str) -> str:
     return re.sub(r"\s+", " ", normalize_quote_style((text or "").strip()))
@@ -1236,6 +1250,30 @@ def is_quote_only_correction(original: str, corrected: str) -> bool:
     if not original_base or not corrected_base:
         return False
     return original_base == corrected_base
+
+def is_nukta_only_correction(original: str, corrected: str, reason: str) -> bool:
+    if normalize_for_equality(original) == normalize_for_equality(corrected):
+        return False
+    original_base = normalize_for_equality(strip_nukta_chars(original))
+    corrected_base = normalize_for_equality(strip_nukta_chars(corrected))
+    if not original_base or not corrected_base or original_base != corrected_base:
+        return False
+
+    reason_lower = (reason or "").strip().lower()
+    return any(marker in reason_lower for marker in (
+        "वर्तनी",
+        "spelling",
+        "orthography",
+        "loanword",
+        "transliteration",
+        "style",
+    ))
+
+def strip_punctuation_spacing(text: str) -> str:
+    cleaned = normalize_quote_style((text or "").strip())
+    cleaned = re.sub(r"\s*([,;:!?।])\s*", r"\1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
 
 def is_heading_like_hi(text: str) -> bool:
     t = re.sub(r"\s+", " ", (text or "").strip())
@@ -1292,6 +1330,127 @@ def is_ignored_styleguide_issue(text: str) -> bool:
         "चन्द्रबिन्दु का प्रयोग करें",
     )
     return any(marker in lower for marker in markers)
+
+def is_self_contradictory_reason(original: str, corrected: str, reason: str) -> bool:
+    reason_text = reason or ""
+    if not reason_text:
+        return False
+
+    quote_pairs = re.findall(
+        r"""['"“”‘’]([^'"“”‘’]+)['"“”‘’]\s*(?:को|to)\s*['"“”‘’]([^'"“”‘’]+)['"“”‘’]""",
+        reason_text,
+        flags=re.IGNORECASE,
+    )
+    for source, target in quote_pairs:
+        if normalize_for_equality(source) == normalize_for_equality(target):
+            return True
+
+    return False
+
+def is_bad_punctuation_spacing_correction(original: str, corrected: str, reason: str) -> bool:
+    reason_lower = (reason or "").strip().lower()
+    if not any(marker in reason_lower for marker in (
+        "विराम",
+        "punctuation",
+        "spacing",
+        "space",
+        "comma",
+    )):
+        return False
+
+    if strip_punctuation_spacing(original) != strip_punctuation_spacing(corrected):
+        return False
+
+    original_text = normalize_quote_style(original or "")
+    corrected_text = normalize_quote_style(corrected or "")
+    had_post_punct_space = re.search(r"[,;:!?।]\s+[A-Za-z\u0900-\u097F]", original_text)
+    lost_post_punct_space = re.search(r"[,;:!?।][A-Za-z\u0900-\u097F]", corrected_text)
+    return bool(had_post_punct_space and lost_post_punct_space)
+
+def is_redundant_gender_rewrite(original: str, corrected: str, reason: str) -> bool:
+    reason_lower = (reason or "").strip().lower()
+    if not any(marker in reason_lower for marker in (
+        "वर्तनी",
+        "spelling",
+        "grammar",
+        "orthography",
+        "house style",
+        "style",
+    )):
+        return False
+
+    original_tokens = (original or "").split()
+    corrected_tokens = (corrected or "").split()
+    if len(original_tokens) != len(corrected_tokens) or len(original_tokens) < 2:
+        return False
+
+    feminine_contexts = {
+        "महिला",
+        "स्त्री",
+        "लड़की",
+        "युवती",
+        "बालिका",
+    }
+    if normalise_hi(original_tokens[1]) not in {normalise_hi(x) for x in feminine_contexts}:
+        return False
+    if normalise_hi(original_tokens[1]) != normalise_hi(corrected_tokens[1]):
+        return False
+
+    if any(
+        normalise_hi(o) != normalise_hi(c)
+        for o, c in zip(original_tokens[2:], corrected_tokens[2:])
+    ):
+        return False
+
+    original_head = normalise_hi(original_tokens[0])
+    corrected_head = normalise_hi(corrected_tokens[0])
+    if not original_head or not corrected_head or original_head == corrected_head:
+        return False
+
+    shared_prefix = os.path.commonprefix([original_head, corrected_head])
+    if len(shared_prefix) < max(3, min(len(original_head), len(corrected_head)) - 1):
+        return False
+
+    return True
+
+def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str) -> bool:
+    original_tokens = word_tokens_hi(original)
+    corrected_tokens = word_tokens_hi(corrected)
+    if len(original_tokens) != len(corrected_tokens) or not original_tokens:
+        return False
+
+    diffs = []
+    for original_token, corrected_token in zip(original_tokens, corrected_tokens):
+        if normalise_hi(original_token) != normalise_hi(corrected_token):
+            diffs.append((original_token, corrected_token))
+
+    if len(diffs) != 1:
+        return False
+
+    original_token, corrected_token = diffs[0]
+    if normalise_hi(original_token) != normalise_hi("काफी") or normalise_hi(corrected_token) != normalise_hi("कॉफी"):
+        return False
+
+    beverage_markers = {
+        "पीना", "पिएं", "पियो", "कॉफी", "कप", "मग", "कैफे", "कैफीन",
+        "ब्रू", "दूध", "चीनी", "पेय", "कैप्पुचीनो", "एस्प्रेसो",
+    }
+    context = f"{original} {corrected} {reason}".lower()
+    return not any(marker in context for marker in beverage_markers)
+
+def should_skip_language_change(original: str, corrected: str, reason: str) -> bool:
+    return any((
+        is_noop_reason(reason),
+        is_noop_correction(original, corrected),
+        is_quote_only_correction(original, corrected),
+        is_nukta_only_correction(original, corrected, reason),
+        is_heading_danda_correction(original, corrected, reason),
+        is_ignored_styleguide_issue(reason),
+        is_self_contradictory_reason(original, corrected, reason),
+        is_bad_punctuation_spacing_correction(original, corrected, reason),
+        is_redundant_gender_rewrite(original, corrected, reason),
+        is_ambiguous_homophone_correction(original, corrected, reason),
+    ))
 
 def should_project_editorial_to_language(issue: str) -> bool:
     lower = (issue or "").strip().lower()
@@ -1481,11 +1640,7 @@ def filter_gemini_rows(raw_table, article_text):
             continue
         if any(c.strip() in {"-", "--", "---"} for c in cols):
             continue
-        if is_noop_reason(reason) or is_noop_correction(original, corrected) or is_quote_only_correction(original, corrected):
-            continue
-        if is_heading_danda_correction(original, corrected, reason):
-            continue
-        if is_ignored_styleguide_issue(reason):
+        if should_skip_language_change(original, corrected, reason):
             continue
 
         if normalize_for_match(original) in norm_article:
@@ -1864,11 +2019,7 @@ def split_spelling_grammar_hi(table_md):
         reason = r.strip()
         if not reason or reason in {"-", "--", "---"}:
             continue
-        if is_noop_reason(reason) or is_noop_correction(o, c) or is_quote_only_correction(o, c):
-            continue
-        if is_heading_danda_correction(o, c, reason):
-            continue
-        if is_ignored_styleguide_issue(reason):
+        if should_skip_language_change(o, c, reason):
             continue
 
         if classify_language_issue(o, c, reason) == "spelling":
@@ -1892,11 +2043,7 @@ def parse_language_rows(table_md, article_data=None):
             continue
         if any(x.strip() in {"-", "--", "---"} for x in (original, corrected, reason)):
             continue
-        if is_noop_reason(reason) or is_noop_correction(original, corrected) or is_quote_only_correction(original, corrected):
-            continue
-        if is_heading_danda_correction(original, corrected, reason):
-            continue
-        if is_ignored_styleguide_issue(reason):
+        if should_skip_language_change(original, corrected, reason):
             continue
 
         key = (canon_hi(original), canon_hi(corrected), canon_hi(reason))
@@ -1913,11 +2060,7 @@ def parse_language_rows(table_md, article_data=None):
             original, corrected, reason = expand_language_row_context(
                 article_data, original, corrected, reason
             )
-        if is_noop_reason(reason) or is_noop_correction(original, corrected) or is_quote_only_correction(original, corrected):
-            continue
-        if is_heading_danda_correction(original, corrected, reason):
-            continue
-        if is_ignored_styleguide_issue(reason):
+        if should_skip_language_change(original, corrected, reason):
             continue
         rows.append((original, corrected, reason))
 
@@ -1947,21 +2090,13 @@ def parse_editorial_rows(editorial_md, article_data=None):
             excerpt.strip(),
             corrected.strip(),
         )
-        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected) or is_quote_only_correction(excerpt, corrected):
-            continue
-        if is_heading_danda_correction(excerpt, corrected, issue):
-            continue
-        if is_ignored_styleguide_issue(issue):
+        if should_skip_language_change(excerpt, corrected, issue):
             continue
         if article_data:
             excerpt, corrected, _ = expand_language_row_context(
                 article_data, excerpt, corrected, issue
             )
-        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected) or is_quote_only_correction(excerpt, corrected):
-            continue
-        if is_heading_danda_correction(excerpt, corrected, issue):
-            continue
-        if is_ignored_styleguide_issue(issue):
+        if should_skip_language_change(excerpt, corrected, issue):
             continue
 
         key = (canon_hi(issue), canon_hi(location), canon_hi(excerpt), canon_hi(corrected))
@@ -2010,11 +2145,7 @@ def build_language_tables(language_rows, editorial_rows=None):
     for original, corrected, reason in (language_rows or []) + (editorial_rows or []):
         if not original or not corrected or not reason:
             continue
-        if is_noop_reason(reason) or is_noop_correction(original, corrected) or is_quote_only_correction(original, corrected):
-            continue
-        if is_heading_danda_correction(original, corrected, reason):
-            continue
-        if is_ignored_styleguide_issue(reason):
+        if should_skip_language_change(original, corrected, reason):
             continue
 
         key = (canon_hi(original), canon_hi(corrected), canon_hi(reason))
@@ -2070,11 +2201,7 @@ def filter_editorial_rows(raw_table, article_text):
             continue
 
         # Corrected must be different from excerpt (after trimming)
-        if is_noop_reason(issue) or is_noop_correction(excerpt, corrected) or is_quote_only_correction(excerpt, corrected):
-            continue
-        if is_heading_danda_correction(excerpt, corrected, issue):
-            continue
-        if is_ignored_styleguide_issue(issue):
+        if should_skip_language_change(excerpt, corrected, issue):
             continue
 
         if not header_added:
@@ -2123,8 +2250,9 @@ Must-follow Hindi editorial rules:
 - Use single quotes for titles (books, films, shows, programs, named schemes).
 - Straight and curly variants of the same quote type are both acceptable; do not flag quote-shape-only swaps such as "..." vs “...”.
 - This publication style does not use chandrabindu in normal spellings where the house style prefers anusvara or the non-chandrabindu form; for example, prefer "पांच" over "पाँच".
+- Do not suggest nukta-only rewrites in ordinary Hindi words when the non-nukta spelling is already acceptable house style (for example, do not force ज्यादा -> ज़्यादा, जरूरी -> ज़रूरी, बाजार -> बाज़ार, नजर -> नज़र).
 - Do not introduce chandrabindu in corrected text unless it is unquestionably required by the publication style.
-- For established loanwords that conventionally use the "ऑ" sound, prefer the standard spelling with "ऑ" (for example, "कॉपी", "कॉफी", "कॉलेज") instead of forms like "कापी", "काफी", "कालेज".
+- For established loanwords that conventionally use the "ऑ" sound, prefer the standard spelling with "ऑ" when the correction is truly unambiguous (for example, "कापी" -> "कॉपी", "कालेज" -> "कॉलेज"). Do not change a normal Hindi word just because it resembles a loanword; for example, do not replace "काफी" meaning "enough/quite" with "कॉफी".
 - Flag first-mention abbreviation issues only when the short form refers to a named entity
   (such as an organisation, authority, institution, political party, law, scheme, or court)
   and the expansion is genuinely needed for clarity.
@@ -2147,6 +2275,7 @@ Guidance:
 - Do not stop after finding the first issue in a paragraph.
 - Identify all clear issues in the paragraph, including quote misuse, punctuation, spacing, wording, and abbreviation-introduction problems.
 - Apply the house orthography consistently: avoid chandrabindu-style spellings in normal words when the house style prefers non-chandrabindu forms, and preserve standard "ऑ" loanword spellings where clearly appropriate.
+- Prefer the existing non-nukta house-style spellings for ordinary Hindi words unless a proper noun or an unquestionably fixed foreign spelling requires nukta.
 - Do not enforce subjective style preferences such as replacing acceptable loanwords,
   banning sentence openings like "लेकिन", or mandating commas after specific discourse markers.
 - Do not translate acceptable English technical terms into Hindi just to make a correction.
@@ -2241,7 +2370,8 @@ Check for clear violations of these Hindi editorial rules:
 - Use double quotes for direct speech; single quotes for titles.
 - Straight and curly variants of the same quote type are both acceptable; do not flag quote-shape-only swaps such as "..." vs “...”.
 - This publication style avoids chandrabindu in normal house-style spellings; prefer forms like "पांच" over "पाँच".
-- For established loanwords with the "ऑ" sound, prefer standard spellings like "कॉपी", "कॉफी", and "कॉलेज" over plain "का/काॅ/का" forms when the correction is unambiguous.
+- Do not suggest nukta-only rewrites in ordinary Hindi words when the non-nukta spelling is already acceptable house style (for example, ज्यादा/जरूरी/बाजार/नजर are acceptable without forcing nukta).
+- For established loanwords with the "ऑ" sound, prefer standard spellings like "कॉपी" and "कॉलेज" only when the correction is genuinely unambiguous. Do not replace "काफी" with "कॉफी" unless the text clearly refers to the beverage.
 - Flag first-mention abbreviation issues only for named entities or terms that are genuinely unclear without expansion.
 - Do not force expansion of common technical abbreviations, scientific labels, measurements, or UI labels.
 - If a headline/subheading contains क्या/कैसे/क्यों/कब/कितना, it must end with "?".
@@ -2262,6 +2392,7 @@ Rules for output:
 - Corrected Text must be the fixed version of Excerpt and must differ from Excerpt.
 - If the text already follows the rule, do not flag it.
 - For orthography / matra / chandrabindu / standard loanword-form fixes, describe the issue as spelling/वर्तनी, not grammar.
+- Prefer existing non-nukta house-style spellings in ordinary Hindi words unless a proper noun or fixed foreign spelling clearly requires nukta.
 - Do not stop after the first issue; identify all clear issues in the paragraph.
 
 Return output strictly as a markdown table with header:
