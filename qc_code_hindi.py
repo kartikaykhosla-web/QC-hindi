@@ -25,11 +25,12 @@ import base64
 import requests
 import hashlib
 import tempfile
+import io
 import html
 import unicodedata
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import streamlit as st
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
@@ -62,6 +63,8 @@ APP_ACCESS_SUPPORT_TEXT = str(
 ).strip()
 ADMIN_EMAIL = "kartikay.khosla@jagrannewmedia.com"
 HISTORY_DB_PATH = os.path.join(os.path.dirname(__file__), ".app_history.sqlite3")
+SESSION_QUERY_KEY = "_jnm_session"
+SESSION_TTL_HOURS = 24
 
 def _email_allowed(email: str) -> bool:
     return (email or "").strip().lower().endswith(f"@{ALLOWED_EMAIL_DOMAIN}")
@@ -98,6 +101,33 @@ def _history_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+def _hash_session_token(token: str) -> str:
+    return hashlib.sha256(f"{ALLOWED_EMAIL_DOMAIN}:{token}".encode("utf-8")).hexdigest()
+
+def _get_session_query_token() -> str:
+    try:
+        value = st.query_params.get(SESSION_QUERY_KEY, "")
+        if isinstance(value, list):
+            return (value[0] or "").strip()
+        return (value or "").strip()
+    except Exception:
+        return ""
+
+def _set_session_query_token(token: str):
+    try:
+        st.query_params[SESSION_QUERY_KEY] = token
+    except Exception:
+        pass
+
+def _clear_session_query_token():
+    try:
+        st.query_params.pop(SESSION_QUERY_KEY, None)
+    except Exception:
+        pass
+
 def ensure_history_db():
     try:
         with _history_conn() as conn:
@@ -133,10 +163,27 @@ def ensure_history_db():
                 """
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS access_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    app TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    created_ts_utc TEXT NOT NULL,
+                    expires_ts_utc TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    last_seen_ts_utc TEXT
+                )
+                """
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_login_events_app_email_ts ON login_events(app, email, ts_utc)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_analysis_runs_app_source_ts ON analysis_runs(app, source_identity, ts_utc)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_access_sessions_app_email_expiry ON access_sessions(app, email, expires_ts_utc)"
             )
     except Exception:
         pass
@@ -150,6 +197,89 @@ def _clear_pending_analysis_state():
         "_pending_analysis_key",
     ):
         st.session_state.pop(key, None)
+
+def _create_persisted_session(app_name: str, email: str):
+    try:
+        ensure_history_db()
+        token = uuid.uuid4().hex + uuid.uuid4().hex
+        now_iso = _utc_now().isoformat()
+        expires_iso = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+        with _history_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO access_sessions (
+                    token_hash, app, email, created_ts_utc, expires_ts_utc, revoked, last_seen_ts_utc
+                ) VALUES (?, ?, ?, ?, ?, 0, ?)
+                """,
+                (_hash_session_token(token), app_name, (email or "").strip().lower(), now_iso, expires_iso, now_iso),
+            )
+        _set_session_query_token(token)
+    except Exception:
+        pass
+
+def _revoke_persisted_session(app_name: str):
+    token = _get_session_query_token()
+    if token:
+        try:
+            ensure_history_db()
+            with _history_conn() as conn:
+                conn.execute(
+                    "UPDATE access_sessions SET revoked = 1 WHERE app = ? AND token_hash = ?",
+                    (app_name, _hash_session_token(token)),
+                )
+        except Exception:
+            pass
+    _clear_session_query_token()
+
+def _restore_persisted_session(app_name: str) -> bool:
+    if _email_access_granted():
+        return True
+
+    token = _get_session_query_token()
+    if not token:
+        return False
+
+    try:
+        ensure_history_db()
+        now_iso = _utc_now().isoformat()
+        with _history_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT email
+                FROM access_sessions
+                WHERE app = ?
+                  AND token_hash = ?
+                  AND revoked = 0
+                  AND expires_ts_utc > ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (app_name, _hash_session_token(token), now_iso),
+            ).fetchone()
+            if not row:
+                _clear_session_query_token()
+                return False
+
+            refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+            conn.execute(
+                """
+                UPDATE access_sessions
+                SET last_seen_ts_utc = ?, expires_ts_utc = ?
+                WHERE app = ? AND token_hash = ?
+                """,
+                (now_iso, refreshed_expiry, app_name, _hash_session_token(token)),
+            )
+
+        email = (row["email"] or "").strip().lower()
+        if not _email_allowed(email):
+            _clear_session_query_token()
+            return False
+
+        st.session_state["_email_access_granted"] = True
+        st.session_state["_email_access_email"] = email
+        return True
+    except Exception:
+        return False
 
 def queue_analysis_run(source_type: str, source_identity: str, source_label: str, analysis_key: str = ""):
     st.session_state["_pending_run_id"] = uuid.uuid4().hex
@@ -386,10 +516,12 @@ def render_admin_dashboard(app_name: str):
             st.caption("Search by URL, filename, or document hash to see iteration history.")
 
 def enforce_app_access(app_title: str, app_caption: str, app_name: str):
+    _restore_persisted_session(app_name)
     if _email_access_granted():
         with st.sidebar:
             st.caption(f"Signed in as {st.session_state.get('_email_access_email', '')}")
             if st.button("Log out"):
+                _revoke_persisted_session(app_name)
                 _clear_email_access()
                 st.rerun()
         return
@@ -411,6 +543,7 @@ def enforce_app_access(app_title: str, app_caption: str, app_name: str):
             st.session_state["_email_access_granted"] = True
             st.session_state["_email_access_email"] = email
             _record_access_event(app_name, email)
+            _create_persisted_session(app_name, email)
             st.rerun()
     st.stop()
 
@@ -1572,6 +1705,149 @@ def render_language_table(rows):
     lines.append("</tbody></table>")
     return "\n".join(lines)
 
+def parse_markdown_table_rows(table_md: str, expected_columns: int):
+    rows = []
+    for line in (table_md or "").splitlines():
+        row = line.strip()
+        if not row.startswith("|") or row.count("|") < expected_columns:
+            continue
+        parts = [part.strip() for part in row.strip("|").split("|")]
+        if len(parts) != expected_columns:
+            continue
+        if all(re.fullmatch(r":?-{2,}:?", part or "") for part in parts):
+            continue
+        if parts[0].lower() in {"statement", "issue", "original"}:
+            continue
+        rows.append(parts)
+    return rows
+
+def find_hindi_pdf_font_path():
+    candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSerifDevanagari-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSerifDevanagari-Regular.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return ""
+
+def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows, grammar_rows, editorial_rows, fact_md: str):
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    except Exception:
+        return None, "PDF export requires the `reportlab` package."
+
+    font_path = find_hindi_pdf_font_path()
+    if not font_path:
+        return None, "PDF export requires a Devanagari font on the server."
+
+    font_name = "HindiReportFont"
+    try:
+        if font_name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(font_name, font_path))
+    except Exception:
+        return None, "PDF export could not load the Hindi font."
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "qc-title",
+        parent=styles["Title"],
+        fontName=font_name,
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#111827"),
+    )
+    body_style = ParagraphStyle(
+        "qc-body",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=9.5,
+        leading=13,
+        textColor=colors.HexColor("#111827"),
+    )
+    heading_style = ParagraphStyle(
+        "qc-heading",
+        parent=styles["Heading2"],
+        fontName=font_name,
+        fontSize=12,
+        leading=16,
+        textColor=colors.HexColor("#1f2937"),
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+
+    def p(text):
+        safe = html.escape((text or "").replace("\n", " "))
+        return Paragraph(safe, body_style)
+
+    def add_table(story, title, headers, rows, column_widths):
+        story.append(Paragraph(title, heading_style))
+        if not rows:
+            story.append(Paragraph("No issues found", body_style))
+            story.append(Spacer(1, 0.2 * cm))
+            return
+
+        table_data = [[Paragraph(html.escape(h), body_style) for h in headers]]
+        for row in rows:
+            table_data.append([p(cell) for cell in row])
+
+        table = Table(table_data, colWidths=column_widths, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5E7EB")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D1D5DB")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 0.25 * cm))
+
+    fact_rows = parse_markdown_table_rows(fact_md, 3)
+    summary_rows = [
+        ["Source", source_label or "-"],
+        ["User", user_email or "-"],
+        ["Generated (UTC)", _utc_now().strftime("%Y-%m-%d %H:%M:%S")],
+        ["Spelling issues", str(len(spelling_rows or []))],
+        ["Grammar issues", str(len(grammar_rows or []))],
+        ["Editorial issues", str(len(editorial_rows or []))],
+        ["Fact check issues", str(len(fact_rows))],
+    ]
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=1.2 * cm,
+        leftMargin=1.2 * cm,
+        topMargin=1.2 * cm,
+        bottomMargin=1.2 * cm,
+    )
+
+    story = [
+        Paragraph("Hindi QC Report", title_style),
+        Spacer(1, 0.25 * cm),
+    ]
+
+    add_table(story, "Summary", ["Field", "Value"], summary_rows, [4.2 * cm, 12.4 * cm])
+    add_table(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm])
+    add_table(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm])
+    add_table(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [3.2 * cm, 2.4 * cm, 5.2 * cm, 6.0 * cm])
+    add_table(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [6.0 * cm, 4.0 * cm, 6.8 * cm])
+
+    doc.build(story)
+    return buffer.getvalue(), None
+
 def split_spelling_grammar_hi(table_md):
     spelling_rows = []
     grammar_rows = []
@@ -2275,7 +2551,7 @@ if st.sidebar.button("Clear cached AI outputs"):
     st.cache_data.clear()
     clear_persistent_analysis_cache()
     _clear_pending_analysis_state()
-    for key in ("article_content", "input_key", "source_context"):
+    for key in ("article_content", "input_key", "source_context", "source_label"):
         st.session_state.pop(key, None)
 
 article_content = None
@@ -2292,6 +2568,7 @@ if source == "URL":
         st.session_state["article_content"] = article_content
         st.session_state["input_key"] = current_key
         st.session_state["source_context"] = source_context
+        st.session_state["source_label"] = url.strip()
         queue_analysis_run(
             "url",
             current_key,
@@ -2309,6 +2586,7 @@ else:
             st.session_state["article_content"] = article_content
             st.session_state["input_key"] = current_key
             st.session_state["source_context"] = ""
+            st.session_state["source_label"] = uploaded.name or current_key
             queue_analysis_run(
                 "docx",
                 current_key,
@@ -2320,6 +2598,8 @@ if article_content is None:
         article_content = st.session_state.get("article_content")
         source_context = st.session_state.get("source_context", source_context)
 
+source_label = st.session_state.get("source_label", "")
+
 if article_content:
     qc_content = run_pipeline(article_content)
 
@@ -2330,6 +2610,9 @@ if article_content:
     st.divider()
 
     st.subheader("🤖 Gemini QC Review")
+
+    report_pdf_bytes = None
+    report_pdf_error = None
 
     article_text = "\n".join(
         t for c, t in article_content if c in {"paragraph", "table"}
@@ -2399,6 +2682,25 @@ if article_content:
         st.success("✅ No factual issues found")
     else:
         st.markdown(fact_result)
+
+    report_pdf_bytes, report_pdf_error = build_hindi_qc_report_pdf(
+        source_label or (url.strip() if source == "URL" and url else current_key or "QC Report"),
+        _current_access_email(),
+        spelling_table,
+        grammar_table,
+        editorial_rows,
+        fact_result,
+    )
+
+    if report_pdf_bytes:
+        st.download_button(
+            "Download QC Report (PDF)",
+            data=report_pdf_bytes,
+            file_name=f"hindi_qc_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf",
+        )
+    elif report_pdf_error:
+        st.caption(f"PDF report unavailable: {report_pdf_error}")
 
     log_analysis_run(
         "hindi_qc",
