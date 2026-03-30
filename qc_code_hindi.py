@@ -564,7 +564,7 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-PROMPT_VERSION_HI = "2026-03-30-2"
+PROMPT_VERSION_HI = "2026-03-30-3"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -2253,7 +2253,7 @@ def gemini_grammar_review(article_data, source_context=""):
         text for ctype, text in article_data
         if (ctype in {"paragraph", "table"})
         and (ctype != "paragraph" or not is_structural_line_hi(text))
-    ][:60]
+    ][:120]
 
     if not raw_paragraphs:
         return ""
@@ -2326,6 +2326,33 @@ Reason must be explicit and non-empty.
 TEXT:
 """
 
+    SPELLING_RECALL_PROMPT = f"""
+You are a strict Hindi spelling and orthography reviewer.
+
+Scope:
+- Review the full TEXT carefully from start to end
+- Find clear spelling, orthography, matra, nukta, loanword-form, and punctuation-adjacent word errors that may have been missed in a first pass
+- Do NOT translate, summarize, or rewrite
+- Do NOT change meaning
+
+Must-follow Hindi editorial rules:
+- This publication style prefers non-chandrabindu normal forms such as "पांच" over "पाँच".
+- This publication style also prefers the non-nukta house-style forms for ordinary Hindi words such as "ज्यादा", "जरूरी", "बाजार", and "नजर" unless a proper noun clearly requires nukta.
+- For established loanwords that conventionally use the "ऑ" sound, prefer the standard spelling with "ऑ" only when the correction is genuinely unambiguous (for example, "कापी" -> "कॉपी", "कालेज" -> "कॉलेज"). Do not replace "काफी" with "कॉफी" unless the text clearly refers to the beverage.
+- Do not create subjective wording changes.
+- Original must be an exact substring from TEXT.
+
+{rules_block}
+{source_style_notes}
+
+Return output strictly as table with header:
+| Original | Corrected | Reason |
+
+Reason must explicitly mention spelling/वर्तनी.
+
+TEXT:
+"""
+
     responses = []
     last_error = None
 
@@ -2339,6 +2366,23 @@ TEXT:
                     "top_k": 1,
                     "candidate_count": 1,
                     "max_output_tokens": 1400
+                },
+            )
+            responses.append(out)
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    for chunk in batch_hindi_texts(raw_paragraphs, max_chars=4200):
+        try:
+            out = generate_text(
+                SPELLING_RECALL_PROMPT + chunk,
+                generation_config={
+                    "temperature": 0,
+                    "top_p": 1,
+                    "top_k": 1,
+                    "candidate_count": 1,
+                    "max_output_tokens": 1600
                 },
             )
             responses.append(out)
