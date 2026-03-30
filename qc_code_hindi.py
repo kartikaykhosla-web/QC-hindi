@@ -1207,17 +1207,17 @@ def normalize_quote_style(text: str) -> str:
     }))
 
 NUKTA_STRIP_TRANSLATION = str.maketrans({
-    "क़": "क",
-    "ख़": "ख",
-    "ग़": "ग",
-    "ज़": "ज",
-    "ड़": "ड",
-    "ढ़": "ढ",
-    "फ़": "फ",
-    "य़": "य",
-    "ऩ": "न",
-    "ऱ": "र",
-    "ऴ": "ळ",
+    ord("क़"): "क",
+    ord("ख़"): "ख",
+    ord("ग़"): "ग",
+    ord("ज़"): "ज",
+    ord("ड़"): "ड",
+    ord("ढ़"): "ढ",
+    ord("फ़"): "फ",
+    ord("य़"): "य",
+    ord("ऩ"): "न",
+    ord("ऱ"): "र",
+    ord("ऴ"): "ळ",
 })
 
 def strip_quote_chars(text: str) -> str:
