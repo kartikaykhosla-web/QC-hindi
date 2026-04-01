@@ -1102,7 +1102,7 @@ RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-PROMPT_VERSION_HI = "2026-04-01-1"
+PROMPT_VERSION_HI = "2026-04-01-2"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -1378,6 +1378,19 @@ HOUSE_STYLE_NUKTA_REPLACEMENTS = {
     "नजरअंदाज़": "नजरअंदाज",
 }
 
+IYE_ENDING_EXCLUSIONS = {
+    "लिए", "दिए", "किए", "लिये", "दिये", "किये",
+    "जिए", "जीए", "पीए", "चाहिए", "आइए", "जाइए",
+    "कहिए", "रहिए", "लीजिए", "दीजिए", "कीजिए", "पीजिए",
+    "देखिए", "सुनिए", "मानिए", "जानिए", "बताइए", "अपनाइए",
+    "हटाइए", "लगाइए", "करिए", "भरिए", "धरिए", "रखिए",
+    "आईए", "जाईए",
+}
+
+IYE_ENDING_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9\u0900-\u097F])([A-Za-z\u0900-\u097F]{4,}िए)(?![A-Za-z0-9\u0900-\u097F])"
+)
+
 def apply_house_style_text_sanitizer(text: str) -> str:
     sanitized = text or ""
     sanitized = sanitized.replace("ँ", "ं")
@@ -1388,6 +1401,35 @@ def apply_house_style_text_sanitizer(text: str) -> str:
             sanitized,
         )
     return sanitized
+
+def infer_iye_ending_rows(article_data):
+    rows = []
+    seen = set()
+    excluded = {normalise_hi(word) for word in IYE_ENDING_EXCLUSIONS}
+
+    for ctype, text in article_data or []:
+        if ctype not in {"heading", "paragraph", "table"}:
+            continue
+
+        sentences = split_hindi_sentences(text) or [text]
+        for sentence in sentences:
+            for match in IYE_ENDING_PATTERN.finditer(sentence):
+                token = match.group(1)
+                normalized = normalise_hi(token)
+                if normalized in excluded:
+                    continue
+                corrected_token = re.sub(r"िए$", "िये", token)
+                if corrected_token == token:
+                    continue
+                corrected_sentence = sentence.replace(token, corrected_token, 1)
+                reason = f"वर्तनी / house style: use '{corrected_token}'"
+                key = (canon_hi(sentence), canon_hi(corrected_sentence), canon_hi(reason))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append((sentence.strip(), corrected_sentence.strip(), reason))
+
+    return rows
 
 def get_domain(url: str) -> str:
     return (urlparse(url).netloc or "").lower()
@@ -2135,6 +2177,13 @@ def rule_based_spelling_rows(article_data):
                 seen.add(key)
                 rows.append((sentence.strip(), corrected_sentence.strip(), reason))
 
+    for sentence, corrected_sentence, reason in infer_iye_ending_rows(article_data):
+        key = (canon_hi(sentence), canon_hi(corrected_sentence), canon_hi(reason))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append((sentence, corrected_sentence, reason))
+
     return rows
 
 def batch_hindi_texts(texts, max_chars=6000):
@@ -2853,6 +2902,7 @@ Must-follow Hindi editorial rules:
 - Do not suggest nukta-only rewrites in ordinary Hindi words when the non-nukta spelling is already acceptable house style (for example, do not force ज्यादा -> ज़्यादा, जरूरी -> ज़रूरी, बाजार -> बाज़ार, नजर -> नज़र).
 - Do not introduce chandrabindu in corrected text unless it is unquestionably required by the publication style.
 - For established loanwords that conventionally use the "ऑ" sound, prefer the standard spelling with "ऑ" when the correction is truly unambiguous (for example, "कापी" -> "कॉपी", "कालेज" -> "कॉलेज"). Do not change a normal Hindi word just because it resembles a loanword; for example, do not replace "काफी" meaning "enough/quite" with "कॉफी".
+- For transliterated proper nouns or foreign names ending in "िए", prefer the house-style "िये" ending when that is clearly the intended pronunciation/transliteration (for example, "तुर्किए" -> "तुर्किये"). Do not apply this to ordinary Hindi verb forms such as "लिए", "दिए", "किए", "चाहिए", or "दीजिए".
 - Flag first-mention abbreviation issues only when the short form refers to a named entity
   (such as an organisation, authority, institution, political party, law, scheme, or court)
   and the expansion is genuinely needed for clarity.
@@ -2906,6 +2956,7 @@ Must-follow Hindi editorial rules:
 - This publication style prefers non-chandrabindu normal forms such as "पांच" over "पाँच".
 - This publication style also prefers the non-nukta house-style forms for ordinary Hindi words such as "ज्यादा", "जरूरी", "बाजार", and "नजर" unless a proper noun clearly requires nukta.
 - For established loanwords that conventionally use the "ऑ" sound, prefer the standard spelling with "ऑ" only when the correction is genuinely unambiguous (for example, "कापी" -> "कॉपी", "कालेज" -> "कॉलेज"). Do not replace "काफी" with "कॉफी" unless the text clearly refers to the beverage.
+- For transliterated proper nouns or foreign names ending in "िए", prefer the house-style "िये" ending when that is clearly the intended pronunciation/transliteration (for example, "तुर्किए" -> "तुर्किये"). Do not change ordinary Hindi verb forms such as "लिए", "दिए", "किए", "चाहिए", or "दीजिए".
 - Do not create subjective wording changes.
 - Original must be an exact substring from TEXT.
 
@@ -3016,6 +3067,7 @@ Check for clear violations of these Hindi editorial rules:
 - This publication style avoids chandrabindu in normal house-style spellings; prefer forms like "पांच" over "पाँच".
 - Do not suggest nukta-only rewrites in ordinary Hindi words when the non-nukta spelling is already acceptable house style (for example, ज्यादा/जरूरी/बाजार/नजर are acceptable without forcing nukta).
 - For established loanwords with the "ऑ" sound, prefer standard spellings like "कॉपी" and "कॉलेज" only when the correction is genuinely unambiguous. Do not replace "काफी" with "कॉफी" unless the text clearly refers to the beverage.
+- For transliterated proper nouns or foreign names ending in "िए", prefer the house-style "िये" ending when that is clearly the intended pronunciation/transliteration (for example, "तुर्किए" -> "तुर्किये"). Do not apply this to ordinary Hindi verb forms such as "लिए", "दिए", "किए", "चाहिए", or "दीजिए".
 - Flag first-mention abbreviation issues only for named entities or terms that are genuinely unclear without expansion.
 - Do not force expansion of common technical abbreviations, scientific labels, measurements, or UI labels.
 - If a headline/subheading contains क्या/कैसे/क्यों/कब/कितना, it must end with "?".
