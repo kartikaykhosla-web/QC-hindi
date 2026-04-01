@@ -32,7 +32,27 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone, timedelta
 import streamlit as st
-import extra_streamlit_components as stx
+IMPORT_ONLY = os.environ.get("QC_HINDI_IMPORT_ONLY") == "1"
+try:
+    import extra_streamlit_components as stx
+except Exception:
+    if IMPORT_ONLY:
+        class _DummyCookieManager:
+            def get(self, *args, **kwargs):
+                return ""
+
+            def set(self, *args, **kwargs):
+                return None
+
+            def delete(self, *args, **kwargs):
+                return None
+
+        class _DummySTX:
+            CookieManager = _DummyCookieManager
+
+        stx = _DummySTX()
+    else:
+        raise
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -48,7 +68,8 @@ from google.genai import types as genai_types
 # =================================================
 # STREAMLIT CONFIG
 # =================================================
-st.set_page_config(page_title="Hindi Article QC Tool (Gemini)", layout="wide")
+if not IMPORT_ONLY:
+    st.set_page_config(page_title="Hindi Article QC Tool (Gemini)", layout="wide")
 
 def _secret(name: str, default=""):
     try:
@@ -1062,13 +1083,14 @@ def enforce_app_access(app_title: str, app_caption: str, app_name: str):
             st.rerun()
     st.stop()
 
-enforce_app_access(
-    "🧪 Hindi Article QC Tool (Gemini 2.5)",
-    "Hindi Spelling · Grammar · Editorial Safety · AI Review",
-    "hindi_qc",
-)
-st.title("🧪 Hindi Article QC Tool (Gemini 2.5)")
-st.caption("Hindi Spelling · Grammar · Editorial Safety · AI Review")
+if not IMPORT_ONLY:
+    enforce_app_access(
+        "🧪 Hindi Article QC Tool (Gemini 2.5)",
+        "Hindi Spelling · Grammar · Editorial Safety · AI Review",
+        "hindi_qc",
+    )
+    st.title("🧪 Hindi Article QC Tool (Gemini 2.5)")
+    st.caption("Hindi Spelling · Grammar · Editorial Safety · AI Review")
 
 # =================================================
 # AUTH CONFIG
@@ -1080,7 +1102,7 @@ RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-PROMPT_VERSION_HI = "2026-03-30-4"
+PROMPT_VERSION_HI = "2026-04-01-1"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -1351,10 +1373,14 @@ HOUSE_STYLE_NUKTA_REPLACEMENTS = {
     "ज़रूरी": "जरूरी",
     "बाज़ार": "बाजार",
     "नज़र": "नजर",
+    "नज़रअंदाज़": "नजरअंदाज",
+    "नज़रअंदाज": "नजरअंदाज",
+    "नजरअंदाज़": "नजरअंदाज",
 }
 
 def apply_house_style_text_sanitizer(text: str) -> str:
     sanitized = text or ""
+    sanitized = sanitized.replace("ँ", "ं")
     for wrong, correct in HOUSE_STYLE_NUKTA_REPLACEMENTS.items():
         sanitized = re.sub(
             rf"(?<![A-Za-z0-9\u0900-\u097F]){re.escape(wrong)}(?![A-Za-z0-9\u0900-\u097F])",
@@ -2091,7 +2117,7 @@ def rule_based_spelling_rows(article_data):
             rf"(?<![A-Za-z0-9\u0900-\u097F]){re.escape(wrong)}(?![A-Za-z0-9\u0900-\u097F])"
         )
         for ctype, text in article_data or []:
-            if ctype not in {"paragraph", "table"}:
+            if ctype not in {"heading", "paragraph", "table"}:
                 continue
             if wrong not in text:
                 continue
@@ -2788,7 +2814,7 @@ def filter_editorial_rows(raw_table, article_text):
 def gemini_grammar_review(article_data, source_context=""):
     raw_paragraphs = []
     for ctype, text in article_data:
-        if ctype not in {"paragraph", "table"}:
+        if ctype not in {"heading", "paragraph", "table"}:
             continue
         if ctype == "paragraph" and is_structural_line_hi(text):
             continue
@@ -2971,7 +2997,7 @@ TEXT:
 def gemini_editorial_review_hi(article_data, source_context=""):
     paragraphs = []
     for ctype, text in article_data:
-        if ctype != "paragraph":
+        if ctype not in {"heading", "paragraph"}:
             continue
         paragraphs.extend(segment_hindi_review_text(text, max_chars=700))
     if not paragraphs:
@@ -3180,7 +3206,7 @@ def gemini_fact_check(article_data):
         return ""
 
     full_text = "\n".join(
-        text for ctype, text in article_data if ctype in {"paragraph", "table"}
+        text for ctype, text in article_data if ctype in {"heading", "paragraph", "table"}
     )
 
     rows = []
@@ -3293,187 +3319,188 @@ def run_pipeline(content):
 # =================================================
 # STREAMLIT UI (UNCHANGED STRUCTURE)
 # =================================================
-st.sidebar.header("Input")
-source = st.sidebar.radio("Source", ["URL", "DOCX"])
-analyze_clicked = st.sidebar.button("Analyze")
-if st.sidebar.button("Clear cached AI outputs"):
-    st.cache_data.clear()
-    clear_persistent_analysis_cache()
-    _clear_pending_analysis_state()
-    for key in ("article_content", "input_key", "source_context", "source_label"):
-        st.session_state.pop(key, None)
+if not IMPORT_ONLY:
+    st.sidebar.header("Input")
+    source = st.sidebar.radio("Source", ["URL", "DOCX"])
+    analyze_clicked = st.sidebar.button("Analyze")
+    if st.sidebar.button("Clear cached AI outputs"):
+        st.cache_data.clear()
+        clear_persistent_analysis_cache()
+        _clear_pending_analysis_state()
+        for key in ("article_content", "input_key", "source_context", "source_label"):
+            st.session_state.pop(key, None)
 
-article_content = None
-current_key = None
-source_context = ""
+    article_content = None
+    current_key = None
+    source_context = ""
 
-if source == "URL":
-    url = st.sidebar.text_input("Hindi Article URL")
-    if url:
-        current_key = f"url:{url.strip()}"
-        source_context = url.strip()
-    if analyze_clicked and url:
-        article_content = clean_article(url)
-        st.session_state["article_content"] = article_content
-        st.session_state["input_key"] = current_key
-        st.session_state["source_context"] = source_context
-        st.session_state["source_label"] = url.strip()
-        queue_analysis_run(
-            "url",
-            current_key,
-            url.strip(),
-        )
-else:
-    uploaded = st.sidebar.file_uploader("Upload DOCX", type=["docx"])
-    if uploaded:
-        file_bytes = uploaded.getvalue()
-        current_key = "docx:" + hashlib.sha256(file_bytes).hexdigest()
-        if analyze_clicked:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as f:
-                f.write(file_bytes)
-                article_content = clean_docx(f.name)
+    if source == "URL":
+        url = st.sidebar.text_input("Hindi Article URL")
+        if url:
+            current_key = f"url:{url.strip()}"
+            source_context = url.strip()
+        if analyze_clicked and url:
+            article_content = clean_article(url)
             st.session_state["article_content"] = article_content
             st.session_state["input_key"] = current_key
-            st.session_state["source_context"] = ""
-            st.session_state["source_label"] = uploaded.name or current_key
+            st.session_state["source_context"] = source_context
+            st.session_state["source_label"] = url.strip()
             queue_analysis_run(
-                "docx",
+                "url",
                 current_key,
-                uploaded.name or current_key,
+                url.strip(),
+            )
+    else:
+        uploaded = st.sidebar.file_uploader("Upload DOCX", type=["docx"])
+        if uploaded:
+            file_bytes = uploaded.getvalue()
+            current_key = "docx:" + hashlib.sha256(file_bytes).hexdigest()
+            if analyze_clicked:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as f:
+                    f.write(file_bytes)
+                    article_content = clean_docx(f.name)
+                st.session_state["article_content"] = article_content
+                st.session_state["input_key"] = current_key
+                st.session_state["source_context"] = ""
+                st.session_state["source_label"] = uploaded.name or current_key
+                queue_analysis_run(
+                    "docx",
+                    current_key,
+                    uploaded.name or current_key,
+                )
+
+    if article_content is None:
+        if current_key and st.session_state.get("input_key") == current_key:
+            article_content = st.session_state.get("article_content")
+            source_context = st.session_state.get("source_context", source_context)
+
+    source_label = st.session_state.get("source_label", "")
+
+    if article_content:
+        qc_content = run_pipeline(article_content)
+
+        st.subheader("📄 Final Article")
+        for _, t in qc_content:
+            st.write(t)
+
+        st.divider()
+
+        st.subheader("🤖 Gemini QC Review")
+
+        report_pdf_bytes = None
+        report_pdf_error = None
+
+        article_text = "\n".join(
+            t for c, t in article_content if c in {"heading", "paragraph", "table"}
+        )
+
+        snapshot = load_analysis_snapshot(qc_content, source_context)
+        if snapshot:
+            raw = snapshot.get("grammar_raw", "")
+            editorial_raw = snapshot.get("editorial_raw", "")
+            fact_result = snapshot.get("fact_result", "")
+        else:
+            raw = cached_gemini_grammar_review(qc_content, source_context)
+            editorial_raw = cached_gemini_editorial_review_hi(qc_content, source_context)
+            fact_result = cached_gemini_fact_check(qc_content)
+            save_analysis_snapshot(
+                qc_content,
+                {
+                    "grammar_raw": raw,
+                    "editorial_raw": editorial_raw,
+                    "fact_result": fact_result,
+                },
+                source_context,
             )
 
-if article_content is None:
-    if current_key and st.session_state.get("input_key") == current_key:
-        article_content = st.session_state.get("article_content")
-        source_context = st.session_state.get("source_context", source_context)
+        clean = filter_gemini_rows(raw, article_text)
+        language_rows = parse_language_rows(clean, qc_content)
 
-source_label = st.session_state.get("source_label", "")
+        editorial_clean = filter_editorial_rows(editorial_raw, article_text)
+        editorial_rows = parse_editorial_rows(editorial_clean, qc_content)
+        editorial_language_rows = parse_editorial_as_language_rows(editorial_clean, qc_content)
+        rule_based_rows = rule_based_spelling_rows(qc_content)
+        editorial_display = build_editorial_table(editorial_rows)
 
-if article_content:
-    qc_content = run_pipeline(article_content)
-
-    st.subheader("📄 Final Article")
-    for _, t in qc_content:
-        st.write(t)
-
-    st.divider()
-
-    st.subheader("🤖 Gemini QC Review")
-
-    report_pdf_bytes = None
-    report_pdf_error = None
-
-    article_text = "\n".join(
-        t for c, t in article_content if c in {"paragraph", "table"}
-    )
-
-    snapshot = load_analysis_snapshot(qc_content, source_context)
-    if snapshot:
-        raw = snapshot.get("grammar_raw", "")
-        editorial_raw = snapshot.get("editorial_raw", "")
-        fact_result = snapshot.get("fact_result", "")
-    else:
-        raw = cached_gemini_grammar_review(qc_content, source_context)
-        editorial_raw = cached_gemini_editorial_review_hi(qc_content, source_context)
-        fact_result = cached_gemini_fact_check(qc_content)
-        save_analysis_snapshot(
-            qc_content,
-            {
-                "grammar_raw": raw,
-                "editorial_raw": editorial_raw,
-                "fact_result": fact_result,
-            },
-            source_context,
+        spelling_table, grammar_table = build_language_tables(
+            language_rows + rule_based_rows,
+            editorial_language_rows,
+        )
+        spelling_count = len(spelling_table)
+        grammar_count = len(grammar_table)
+        editorial_count = len(editorial_rows)
+        fact_count = 0 if is_ai_error_output(fact_result) else count_markdown_rows(fact_result, "Statement")
+        render_qc_score_summary(
+            spelling_count,
+            grammar_count,
+            editorial_count,
+            fact_count,
+            any(is_ai_error_output(value) for value in (raw, editorial_raw, fact_result)),
         )
 
-    clean = filter_gemini_rows(raw, article_text)
-    language_rows = parse_language_rows(clean, qc_content)
+        st.markdown("### ✍️ Spelling Issues")
+        if render_ai_error("Spelling/Grammar AI", raw):
+            pass
+        elif spelling_table:
+            st.markdown(render_language_table(spelling_table), unsafe_allow_html=True)
+        else:
+            st.success("✅ No spelling issues found")
 
-    editorial_clean = filter_editorial_rows(editorial_raw, article_text)
-    editorial_rows = parse_editorial_rows(editorial_clean, qc_content)
-    editorial_language_rows = parse_editorial_as_language_rows(editorial_clean, qc_content)
-    rule_based_rows = rule_based_spelling_rows(qc_content)
-    editorial_display = build_editorial_table(editorial_rows)
+        st.markdown("### 🧠 Grammar Issues")
+        if render_ai_error("Spelling/Grammar AI", raw):
+            pass
+        elif grammar_table:
+            st.markdown(render_language_table(grammar_table), unsafe_allow_html=True)
+        else:
+            st.success("✅ No grammar issues found")
 
-    spelling_table, grammar_table = build_language_tables(
-        language_rows + rule_based_rows,
-        editorial_language_rows,
-    )
-    spelling_count = len(spelling_table)
-    grammar_count = len(grammar_table)
-    editorial_count = len(editorial_rows)
-    fact_count = 0 if is_ai_error_output(fact_result) else count_markdown_rows(fact_result, "Statement")
-    render_qc_score_summary(
-        spelling_count,
-        grammar_count,
-        editorial_count,
-        fact_count,
-        any(is_ai_error_output(value) for value in (raw, editorial_raw, fact_result)),
-    )
+        st.markdown("### 🧠 Gemini Editorial Review")
+        if render_ai_error("Editorial AI", editorial_raw):
+            pass
+        elif editorial_display:
+            st.markdown(editorial_display)
+        else:
+            st.success("✅ No editorial issues found")
 
-    st.markdown("### ✍️ Spelling Issues")
-    if render_ai_error("Spelling/Grammar AI", raw):
-        pass
-    elif spelling_table:
-        st.markdown(render_language_table(spelling_table), unsafe_allow_html=True)
-    else:
-        st.success("✅ No spelling issues found")
+        st.markdown("### 📌 Fact Check")
+        if render_ai_error("Fact-check AI", fact_result):
+            pass
+        elif not fact_result or "| Statement |" not in fact_result:
+            st.success("✅ No factual issues found")
+        else:
+            st.markdown(fact_result)
 
-    st.markdown("### 🧠 Grammar Issues")
-    if render_ai_error("Spelling/Grammar AI", raw):
-        pass
-    elif grammar_table:
-        st.markdown(render_language_table(grammar_table), unsafe_allow_html=True)
-    else:
-        st.success("✅ No grammar issues found")
-
-    st.markdown("### 🧠 Gemini Editorial Review")
-    if render_ai_error("Editorial AI", editorial_raw):
-        pass
-    elif editorial_display:
-        st.markdown(editorial_display)
-    else:
-        st.success("✅ No editorial issues found")
-
-    st.markdown("### 📌 Fact Check")
-    if render_ai_error("Fact-check AI", fact_result):
-        pass
-    elif not fact_result or "| Statement |" not in fact_result:
-        st.success("✅ No factual issues found")
-    else:
-        st.markdown(fact_result)
-
-    report_pdf_bytes, report_pdf_error = build_hindi_qc_report_pdf(
-        source_label or (url.strip() if source == "URL" and url else current_key or "QC Report"),
-        _current_access_email(),
-        spelling_table,
-        grammar_table,
-        editorial_rows,
-        fact_result,
-    )
-
-    if report_pdf_bytes:
-        st.download_button(
-            "Download QC Report (PDF)",
-            data=report_pdf_bytes,
-            file_name=f"hindi_qc_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-            mime="application/pdf",
+        report_pdf_bytes, report_pdf_error = build_hindi_qc_report_pdf(
+            source_label or (url.strip() if source == "URL" and url else current_key or "QC Report"),
+            _current_access_email(),
+            spelling_table,
+            grammar_table,
+            editorial_rows,
+            fact_result,
         )
-    elif report_pdf_error:
-        st.caption(f"PDF report unavailable: {report_pdf_error}")
 
-    log_analysis_run(
-        "hindi_qc",
-        _current_access_email(),
-        st.session_state.get("_pending_source_type", source.lower()),
-        st.session_state.get("_pending_source_identity", current_key or ""),
-        st.session_state.get("_pending_source_label", url.strip() if source == "URL" and url else ""),
-        st.session_state.get("_pending_analysis_key", ""),
-        spelling_count,
-        grammar_count,
-        editorial_count,
-        fact_count,
-    )
+        if report_pdf_bytes:
+            st.download_button(
+                "Download QC Report (PDF)",
+                data=report_pdf_bytes,
+                file_name=f"hindi_qc_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf",
+            )
+        elif report_pdf_error:
+            st.caption(f"PDF report unavailable: {report_pdf_error}")
 
-if _is_admin_user():
-    render_admin_dashboard("hindi_qc")
+        log_analysis_run(
+            "hindi_qc",
+            _current_access_email(),
+            st.session_state.get("_pending_source_type", source.lower()),
+            st.session_state.get("_pending_source_identity", current_key or ""),
+            st.session_state.get("_pending_source_label", url.strip() if source == "URL" and url else ""),
+            st.session_state.get("_pending_analysis_key", ""),
+            spelling_count,
+            grammar_count,
+            editorial_count,
+            fact_count,
+        )
+
+    if _is_admin_user():
+        render_admin_dashboard("hindi_qc")
