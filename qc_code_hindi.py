@@ -1290,7 +1290,10 @@ EXCLUDED_SUBTREE_SELECTORS = [
     ".social-share",
     ".share",
     ".author",
+    "[class*='author']",
+    "[class*='Author']",
     ".byline",
+    "[class*='byline']",
     ".updated",
     ".publish-info",
     ".highlights",
@@ -1302,6 +1305,7 @@ EXCLUDED_SUBTREE_SELECTORS = [
     ".read-more",
     ".also-read",
     ".also_read",
+    "[class*='shortInnerBlock']",
     ".you-may-like",
     ".trending",
     ".copyright",
@@ -1511,6 +1515,19 @@ def extend_content_from_container(container, content, seen):
         content.append((ctype, txt))
         extracted_any = True
 
+    for el in clone.find_all(["h2", "h3", "h4", "h5", "h6"], recursive=True):
+        raw_txt = el.get_text(separator=" ", strip=True)
+        if has_inline_read_more(raw_txt):
+            continue
+        txt = sanitize_extracted_text(raw_txt)
+        if len(txt) < 8:
+            continue
+        if should_skip_extracted_text(txt):
+            continue
+        if txt in seen or not should_add_text_candidate(txt):
+            continue
+        append_text("heading", txt)
+
     for el in clone.find_all(["p", "li"], recursive=True):
         raw_txt = el.get_text(separator=" ", strip=True)
         if has_inline_read_more(raw_txt):
@@ -1544,7 +1561,7 @@ def extend_content_from_container(container, content, seen):
                 continue
             append_text("table", row_text)
 
-    fallback_text = sanitize_extracted_text(clone.get_text(separator="\n", strip=True))
+    fallback_text = clone.get_text(separator="\n", strip=True)
     for para in re.split(r"\n+", fallback_text):
         para = sanitize_extracted_text(para)
         min_len = 8 if is_heading_like_hi(para) else 20
@@ -1554,7 +1571,7 @@ def extend_content_from_container(container, content, seen):
             continue
         if para in seen or not should_add_text_candidate(para):
             continue
-        append_text("paragraph", para)
+        append_text("heading" if is_heading_like_hi(para) else "paragraph", para)
 
 def extract_from_article_roots(soup, url, content, seen):
     roots = []
@@ -1607,14 +1624,15 @@ def extract_from_json_article_body(soup, content, seen):
         cleaned = BeautifulSoup(body, "html.parser").get_text(separator="\n", strip=True)
         for para in re.split(r"\n+|\\n+", cleaned):
             para = sanitize_extracted_text(para)
-            if len(para) < 20:
+            min_len = 8 if is_heading_like_hi(para) else 20
+            if len(para) < min_len:
                 continue
             if should_skip_extracted_text(para):
                 continue
             if para in seen:
                 continue
             seen.add(para)
-            content.append(("paragraph", para))
+            content.append(("heading" if is_heading_like_hi(para) else "paragraph", para))
 
 # =================================================
 # INPUT EXTRACTION (UNCHANGED STRUCTURE)
@@ -1669,8 +1687,16 @@ def clean_article(url):
 
     h1 = soup.find("h1")
     if h1:
-        content.append(("heading", h1.get_text(strip=True)))
+        h1_text = sanitize_extracted_text(h1.get_text(strip=True))
+        if h1_text:
+            content.append(("heading", h1_text))
+            seen.add(h1_text)
     add_meta_description_summary(soup, url, content, seen)
+
+    if is_jagran_domain(url):
+        extract_from_json_article_body(soup, content, seen)
+        if is_sufficient_article_body(content):
+            return content
 
     extract_from_article_roots(soup, url, content, seen)
     extract_from_json_article_body(soup, content, seen)
