@@ -1596,15 +1596,42 @@ def extract_from_article_roots(soup, url, content, seen):
     for node in ordered:
         extend_content_from_container(node, content, seen)
 
+LDJSON_TEXT_FIELD_PATTERN = re.compile(
+    r'"(?P<key>articleBody|text|description)"\s*:\s*"(?P<value>(?:[^"\\]|\\.|[\r\n])*)"',
+    re.DOTALL,
+)
+
+def decode_ldjson_string(value: str) -> str:
+    text = value or ""
+    text = text.replace("\\n", "\n").replace("\\r", "\n").replace("\\t", " ")
+    text = text.replace('\\"', '"').replace("\\/", "/").replace("\\\\", "\\")
+    return text
+
+def extract_text_fields_from_ldjson_raw(raw_script: str):
+    fields = []
+    if not raw_script:
+        return fields
+
+    for match in LDJSON_TEXT_FIELD_PATTERN.finditer(raw_script):
+        key = match.group("key")
+        value = decode_ldjson_string(match.group("value"))
+        if len(value.strip()) > 80:
+            fields.append((key, value))
+    return fields
+
 def extract_from_json_article_body(soup, content, seen):
-    body_texts = []
+    article_body_texts = []
+    auxiliary_texts = []
 
     def extract_article_body(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
                 if k in {"articleBody", "text", "description"} and isinstance(v, str):
                     if len(v) > 80:
-                        body_texts.append(v)
+                        if k == "articleBody":
+                            article_body_texts.append(v)
+                        else:
+                            auxiliary_texts.append(v)
                 else:
                     extract_article_body(v)
         elif isinstance(obj, list):
@@ -1612,13 +1639,20 @@ def extract_from_json_article_body(soup, content, seen):
                 extract_article_body(item)
 
     for script in soup.find_all("script", {"type": "application/ld+json"}):
-        if not script.string:
+        raw_script = script.string or script.get_text() or ""
+        if not raw_script:
             continue
         try:
-            data = json.loads(script.string)
+            data = json.loads(raw_script)
             extract_article_body(data)
         except Exception:
-            continue
+            for key, value in extract_text_fields_from_ldjson_raw(raw_script):
+                if key == "articleBody":
+                    article_body_texts.append(value)
+                elif key in {"text", "description"}:
+                    auxiliary_texts.append(value)
+
+    body_texts = article_body_texts or auxiliary_texts
 
     for body in body_texts:
         cleaned = BeautifulSoup(body, "html.parser").get_text(separator="\n", strip=True)
@@ -1691,12 +1725,13 @@ def clean_article(url):
         if h1_text:
             content.append(("heading", h1_text))
             seen.add(h1_text)
-    add_meta_description_summary(soup, url, content, seen)
 
     if is_jagran_domain(url):
         extract_from_json_article_body(soup, content, seen)
         if is_sufficient_article_body(content):
             return content
+
+    add_meta_description_summary(soup, url, content, seen)
 
     extract_from_article_roots(soup, url, content, seen)
     extract_from_json_article_body(soup, content, seen)
@@ -1905,6 +1940,9 @@ def is_heading_like_hi(text: str) -> bool:
         return True
 
     if ":" in t and word_count <= 18:
+        return True
+
+    if word_count <= 12 and t.endswith("?") and re.search(r"(क्या|कैसे|क्यों|कब|कितना|कौन|किस)", t):
         return True
 
     heading_markers = (
