@@ -89,6 +89,8 @@ HISTORY_DB_PATH = os.path.join(os.path.dirname(__file__), ".app_history.sqlite3"
 HISTORY_SPREADSHEET_ID = str(_secret("HISTORY_SPREADSHEET_ID", "")).strip()
 SESSION_QUERY_KEY = "_jnm_session"
 SESSION_COOKIE_KEY = "_jnm_session"
+SESSION_EMAIL_COOKIE_KEY = "_jnm_email"
+SESSION_EXP_COOKIE_KEY = "_jnm_session_exp"
 SESSION_TTL_HOURS = 24
 SESSION_REFRESH_WINDOW_MINUTES = 15
 
@@ -200,6 +202,43 @@ def _get_cookie_manager():
         st.session_state["_cookie_manager"] = manager
     return manager
 
+def _get_context_cookie(name: str) -> str:
+    try:
+        cookies = getattr(st.context, "cookies", None)
+        if cookies is None:
+            return ""
+        value = cookies.get(name, "")
+        return (value or "").strip()
+    except Exception:
+        return ""
+
+def _get_cookie_value(name: str) -> str:
+    value = _get_context_cookie(name)
+    if value:
+        return value
+    try:
+        value = _get_cookie_manager().get(name)
+        return (value or "").strip()
+    except Exception:
+        return ""
+
+def _set_cookie_value(name: str, value: str):
+    try:
+        _get_cookie_manager().set(
+            name,
+            value,
+            expires_at=datetime.now() + timedelta(hours=SESSION_TTL_HOURS),
+            key=f"set-cookie-{name}",
+        )
+    except Exception:
+        pass
+
+def _clear_cookie_value(name: str):
+    try:
+        _get_cookie_manager().delete(name, key=f"delete-cookie-{name}")
+    except Exception:
+        pass
+
 def _get_session_query_token() -> str:
     try:
         value = st.query_params.get(SESSION_QUERY_KEY, "")
@@ -222,28 +261,39 @@ def _clear_session_query_token():
         pass
 
 def _get_session_cookie_token() -> str:
-    try:
-        value = _get_cookie_manager().get(SESSION_COOKIE_KEY)
-        return (value or "").strip()
-    except Exception:
-        return ""
+    return _get_cookie_value(SESSION_COOKIE_KEY)
 
 def _set_session_cookie_token(token: str):
-    try:
-        _get_cookie_manager().set(
-            SESSION_COOKIE_KEY,
-            token,
-            expires_at=datetime.now() + timedelta(hours=SESSION_TTL_HOURS),
-            key=f"set-cookie-{SESSION_COOKIE_KEY}",
-        )
-    except Exception:
-        pass
+    _set_cookie_value(SESSION_COOKIE_KEY, token)
 
 def _clear_session_cookie_token():
-    try:
-        _get_cookie_manager().delete(SESSION_COOKIE_KEY, key=f"delete-cookie-{SESSION_COOKIE_KEY}")
-    except Exception:
-        pass
+    _clear_cookie_value(SESSION_COOKIE_KEY)
+
+def _get_session_identity_cookie_email() -> str:
+    return _get_cookie_value(SESSION_EMAIL_COOKIE_KEY).lower()
+
+def _get_session_identity_cookie_expiry() -> str:
+    return _get_cookie_value(SESSION_EXP_COOKIE_KEY)
+
+def _set_session_identity_cookies(email: str, expires_iso: str):
+    _set_cookie_value(SESSION_EMAIL_COOKIE_KEY, (email or "").strip().lower())
+    _set_cookie_value(SESSION_EXP_COOKIE_KEY, expires_iso)
+
+def _clear_session_identity_cookies():
+    _clear_cookie_value(SESSION_EMAIL_COOKIE_KEY)
+    _clear_cookie_value(SESSION_EXP_COOKIE_KEY)
+
+def _restore_identity_cookie_session() -> bool:
+    email = _get_session_identity_cookie_email()
+    expires_at = _parse_utc_iso(_get_session_identity_cookie_expiry())
+    if not email or not _email_allowed(email) or not expires_at or expires_at <= _utc_now():
+        _clear_session_identity_cookies()
+        return False
+    refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+    _set_session_identity_cookies(email, refreshed_expiry)
+    st.session_state["_email_access_granted"] = True
+    st.session_state["_email_access_email"] = email
+    return True
 
 def _sqlite_rows(query: str, params=()):
     try:
@@ -536,13 +586,14 @@ def _create_persisted_session(app_name: str, email: str):
                     """,
                     (token_hash, app_name, (email or "").strip().lower(), now_iso, expires_iso, now_iso),
                 )
-        _set_session_query_token(token)
+        _clear_session_query_token()
         _set_session_cookie_token(token)
+        _set_session_identity_cookies(email, expires_iso)
     except Exception:
         pass
 
 def _revoke_persisted_session(app_name: str):
-    token = _get_session_query_token() or _get_session_cookie_token()
+    token = _get_session_cookie_token() or _get_session_query_token()
     if token:
         try:
             token_hash = _hash_session_token(token)
@@ -567,90 +618,82 @@ def _revoke_persisted_session(app_name: str):
             pass
     _clear_session_query_token()
     _clear_session_cookie_token()
+    _clear_session_identity_cookies()
 
 def _restore_persisted_session(app_name: str) -> bool:
     if _email_access_granted():
         return True
 
-    token = _get_session_query_token() or _get_session_cookie_token()
-    if not token:
-        return False
+    token = _get_session_cookie_token() or _get_session_query_token()
+    if token:
+        try:
+            now_iso = _utc_now().isoformat()
+            token_hash = _hash_session_token(token)
+            row = None
+            if _history_uses_sheets():
+                row = _sheet_latest_session_row(app_name, token_hash)
+                if row and row.get("event_type") != "revoke":
+                    expires_at = _parse_utc_iso(row.get("expires_ts_utc", ""))
+                    if expires_at and expires_at > _utc_now():
+                        refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+                        last_seen = _parse_utc_iso(row.get("last_seen_ts_utc", ""))
+                        if (not last_seen) or ((_utc_now() - last_seen) >= timedelta(minutes=SESSION_REFRESH_WINDOW_MINUTES)):
+                            _append_session_event(
+                                app_name,
+                                token_hash,
+                                row.get("email", ""),
+                                "refresh",
+                                refreshed_expiry,
+                                now_iso,
+                            )
+                    else:
+                        row = None
+                else:
+                    row = None
+            else:
+                ensure_history_db()
+                with _history_conn() as conn:
+                    sqlite_row = conn.execute(
+                        """
+                        SELECT email
+                        FROM access_sessions
+                        WHERE app = ?
+                          AND token_hash = ?
+                          AND revoked = 0
+                          AND expires_ts_utc > ?
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (app_name, token_hash, now_iso),
+                    ).fetchone()
+                    if sqlite_row:
+                        refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+                        conn.execute(
+                            """
+                            UPDATE access_sessions
+                            SET last_seen_ts_utc = ?, expires_ts_utc = ?
+                            WHERE app = ? AND token_hash = ?
+                            """,
+                            (now_iso, refreshed_expiry, app_name, token_hash),
+                        )
+                        row = {"email": sqlite_row["email"]}
 
-    try:
-        now_iso = _utc_now().isoformat()
-        token_hash = _hash_session_token(token)
-        row = None
-        if _history_uses_sheets():
-            row = _sheet_latest_session_row(app_name, token_hash)
-            if not row:
-                _clear_session_query_token()
-                _clear_session_cookie_token()
-                return False
-            if row.get("event_type") == "revoke":
-                _clear_session_query_token()
-                _clear_session_cookie_token()
-                return False
-            expires_at = _parse_utc_iso(row.get("expires_ts_utc", ""))
-            if not expires_at or expires_at <= _utc_now():
-                _clear_session_query_token()
-                _clear_session_cookie_token()
-                return False
-            refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
-            last_seen = _parse_utc_iso(row.get("last_seen_ts_utc", ""))
-            if (not last_seen) or ((_utc_now() - last_seen) >= timedelta(minutes=SESSION_REFRESH_WINDOW_MINUTES)):
-                _append_session_event(
-                    app_name,
-                    token_hash,
-                    row.get("email", ""),
-                    "refresh",
-                    refreshed_expiry,
-                    now_iso,
-                )
-        else:
-            ensure_history_db()
-            with _history_conn() as conn:
-                sqlite_row = conn.execute(
-                    """
-                    SELECT email
-                    FROM access_sessions
-                    WHERE app = ?
-                      AND token_hash = ?
-                      AND revoked = 0
-                      AND expires_ts_utc > ?
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (app_name, token_hash, now_iso),
-                ).fetchone()
-                if not sqlite_row:
+            if row:
+                email = (row.get("email") or "").strip().lower()
+                if _email_allowed(email):
+                    refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
                     _clear_session_query_token()
-                    _clear_session_cookie_token()
-                    return False
+                    _set_session_cookie_token(token)
+                    _set_session_identity_cookies(email, refreshed_expiry)
+                    st.session_state["_email_access_granted"] = True
+                    st.session_state["_email_access_email"] = email
+                    return True
+        except Exception:
+            pass
 
-                refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
-                conn.execute(
-                    """
-                    UPDATE access_sessions
-                    SET last_seen_ts_utc = ?, expires_ts_utc = ?
-                    WHERE app = ? AND token_hash = ?
-                    """,
-                    (now_iso, refreshed_expiry, app_name, token_hash),
-                )
-            row = {"email": sqlite_row["email"]}
-
-        email = (row.get("email") or "").strip().lower()
-        if not _email_allowed(email):
-            _clear_session_query_token()
-            _clear_session_cookie_token()
-            return False
-
-        _set_session_query_token(token)
-        _set_session_cookie_token(token)
-        st.session_state["_email_access_granted"] = True
-        st.session_state["_email_access_email"] = email
-        return True
-    except Exception:
-        return False
+    _clear_session_query_token()
+    _clear_session_cookie_token()
+    return _restore_identity_cookie_session()
 
 def queue_analysis_run(source_type: str, source_identity: str, source_label: str, analysis_key: str = ""):
     st.session_state["_pending_run_id"] = uuid.uuid4().hex
