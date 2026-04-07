@@ -3286,7 +3286,7 @@ def extract_fact_statements(article_data):
     seen = set()
 
     for ctype, text in article_data:
-        if ctype not in {"paragraph", "table"}:
+        if ctype not in {"heading", "paragraph", "table"}:
             continue
 
         for sent in split_hindi_sentences(text):
@@ -3372,20 +3372,28 @@ def gemini_fact_check(article_data):
     seen = set()
     had_success = False
     last_error = None
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    client = init_vertex_and_model()
 
     for batch in chunked(statements, 5):
         block = "\n".join(f"- {s}" for s in batch)
 
         PROMPT = f"""
-You are an internal factual consistency auditor.
+You are an internal factual accuracy auditor for current news copy.
+
+Today's date: {today_iso}
 
 Rules:
-- Treat TEXT as closed
-- No external knowledge
-- Quote exact text
-- No paraphrasing
-- Only flag direct contradictions, impossible combinations, or statements that are unsupported by the article itself.
+- Use Google Search grounding for up-to-date verification.
+- Quote exact text from the article under "Statement".
+- Do not paraphrase the article text.
+- For present-tense or current-status claims, verify against information available as of today's date.
+- For explicitly dated historical claims, evaluate them against the date or time period stated in the article, not against today's date.
+- Never rely on stale model memory when grounded search results are missing or disagree.
+- Only flag factual problems: direct contradictions, impossible combinations, outdated current-affairs claims, or statements that remain unverified after grounded search.
 - Do not flag style, wording, naming preference, branding simplification, abbreviation expansion, punctuation, or grammar as factual issues.
+- If grounded search is insufficient for a time-sensitive statement, use Issue as "Needs verification (current)" and say "Could not verify as of {today_iso}" in Correct Fact.
+- If a statement appears supported, omit it.
 
 Return table:
 | Statement | Issue | Correct Fact |
@@ -3398,14 +3406,22 @@ STATEMENTS:
 """
 
         try:
-            out = generate_text(
-                PROMPT,
-                generation_config={
-                    "temperature": 0,
-                    "top_p": 1,
-                    "max_output_tokens": 512
-                },
+            response = client.models.generate_content(
+                model=MODEL_FLASH,
+                contents=PROMPT,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0,
+                    topP=1,
+                    topK=1,
+                    candidateCount=1,
+                    maxOutputTokens=768,
+                    seed=0,
+                    responseMimeType="text/plain",
+                    thinkingConfig=genai_types.ThinkingConfig(thinkingBudget=0),
+                    tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                ),
             )
+            out = response.text or ""
             had_success = True
         except Exception as exc:
             last_error = exc
