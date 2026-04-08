@@ -2303,6 +2303,14 @@ def normalize_fact_correction(issue: str, correction: str, today_iso: str) -> st
         return f"Could not verify reliably as of {today_iso}."
     return (correction or "").strip()
 
+def is_generic_verification_fact(issue: str, correction: str, today_iso: str) -> bool:
+    issue_lower = (issue or "").strip().lower()
+    correction_norm = normalize_fact_correction(issue, correction, today_iso).strip().lower()
+    generic_correction = f"could not verify reliably as of {today_iso}.".lower()
+    return correction_norm == generic_correction and (
+        "needs verification" in issue_lower or "outdated current-affairs claim" in issue_lower
+    )
+
 def is_style_only_fact(statement: str, issue: str, correction: str) -> bool:
     lower_issue = (issue or "").strip().lower()
     lower_correction = (correction or "").strip().lower()
@@ -2681,7 +2689,15 @@ def highlight_diff_pair(original: str, corrected: str):
         original_suffix = "".join(original_tokens[len(original_tokens) - suffix_len:]) if suffix_len else ""
         corrected_suffix = "".join(corrected_tokens[len(corrected_tokens) - suffix_len:]) if suffix_len else ""
 
-        if original_middle or corrected_middle:
+        original_middle_words = len(word_tokens_hi(original_middle))
+        corrected_middle_words = len(word_tokens_hi(corrected_middle))
+        use_compact_highlight = (
+            (original_middle or corrected_middle)
+            and max(original_middle_words, corrected_middle_words) <= 3
+            and max(len(original_middle), len(corrected_middle)) <= 40
+        )
+
+        if use_compact_highlight:
             original_parts = [html.escape(original_prefix)]
             corrected_parts = [html.escape(corrected_prefix)]
             if original_middle:
@@ -2696,7 +2712,7 @@ def highlight_diff_pair(original: str, corrected: str):
             corrected_parts.append(html.escape(corrected_suffix))
             return "".join(original_parts), "".join(corrected_parts)
 
-    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens)
+    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens, autojunk=False)
 
     original_parts = []
     corrected_parts = []
@@ -3535,11 +3551,20 @@ def is_material_fact_candidate(sentence: str) -> bool:
         return True
     return False
 
+def should_keep_lead_fact_sentence(sentence: str) -> bool:
+    sent = (sentence or "").strip()
+    if len(sent) < 25:
+        return False
+    if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
+        return False
+    return is_hindi_fact_sentence(sent) or is_material_fact_candidate(sent)
+
 def extract_fact_statements(article_data):
     statements = []
     seen = set()
     fact_check_mode = is_fact_check_article(article_data)
     lead_paragraphs_taken = 0
+    main_heading_added = False
 
     def add_sentence(sent: str):
         key = canon_hi(sent)
@@ -3552,13 +3577,17 @@ def extract_fact_statements(article_data):
         if ctype not in {"heading", "paragraph", "table"}:
             continue
 
-        if fact_check_mode:
-            if ctype == "heading":
-                lower_heading = (text or "").strip().lower()
-                if any(marker in lower_heading for marker in FACTCHECK_HEADLINE_MARKERS):
-                    add_sentence(text.strip())
-                continue
+        if ctype == "heading":
+            heading_text = (text or "").strip()
+            lower_heading = heading_text.lower()
+            if not main_heading_added and len(heading_text.split()) >= 4:
+                add_sentence(heading_text)
+                main_heading_added = True
+            elif fact_check_mode and any(marker in lower_heading for marker in FACTCHECK_HEADLINE_MARKERS):
+                add_sentence(heading_text)
+            continue
 
+        if fact_check_mode:
             if is_fact_process_sentence(text):
                 continue
 
@@ -3570,13 +3599,18 @@ def extract_fact_statements(article_data):
                         add_sentence(sent)
                 continue
 
-            if ctype == "paragraph" and lead_paragraphs_taken < 3:
+            if ctype == "paragraph" and lead_paragraphs_taken < 5:
                 lead_paragraphs_taken += 1
                 for sent in split_hindi_sentences(text):
-                    if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
-                        continue
-                    if is_hindi_fact_sentence(sent) and is_material_fact_candidate(sent):
+                    if should_keep_lead_fact_sentence(sent):
                         add_sentence(sent)
+            continue
+
+        if ctype == "paragraph" and lead_paragraphs_taken < 5:
+            lead_paragraphs_taken += 1
+            for sent in split_hindi_sentences(text):
+                if should_keep_lead_fact_sentence(sent):
+                    add_sentence(sent)
             continue
 
         for sent in split_hindi_sentences(text):
@@ -3730,6 +3764,8 @@ STATEMENTS:
             if is_no_issue_fact(i, c):
                 continue
             if is_style_only_fact(s, i, c):
+                continue
+            if is_generic_verification_fact(i, c, today_iso):
                 continue
 
             c = normalize_fact_correction(i, c, today_iso)
