@@ -3450,24 +3450,143 @@ HINDI_FACT_VERBS = [
 def is_hindi_fact_sentence(sentence):
     return any(v in sentence for v in HINDI_FACT_VERBS)
 
+FACTCHECK_HEADLINE_MARKERS = (
+    "fact check",
+    "फैक्ट चेक",
+)
+
+FACTCHECK_CONCLUSION_MARKERS = (
+    "निष्कर्ष:",
+    "वायरल दावे गलत",
+    "दावा गलत निकला",
+    "फर्जी दावा",
+    "पुराने हैं",
+    "कोई संबंध नहीं",
+)
+
+FACT_PROCESS_MARKERS = (
+    "आर्काइव लिंक",
+    "archive link",
+    "यूजर",
+    "उपयोगकर्ता",
+    "पोस्ट करते हुए लिखा",
+    "शेयर करते हुए लिखा",
+    "शेयर किया",
+    "पोस्ट किया",
+    "यूट्यूब चैनल",
+    "वेबसाइट पर",
+    "वीडियो न्यूज",
+    "गूगल लेंस",
+    "कीफ्रेम",
+    "कीवर्ड",
+    "प्रोफाइल को",
+    "स्कैन किया",
+    "संपर्क किया",
+    "हमने ",
+    "जांच के लिए",
+    "चेक किया",
+    "पड़ताल में",
+    "फैक्ट चेकर",
+    "रिपोर्ट पढ़ने के लिए",
+    "यहां क्लिक करें",
+    "यहाँ क्लिक करें",
+    "अपलोड मिला",
+    "अपलोड वीडियो",
+    "इंस्टाग्राम यूजर",
+    "एक अन्य वीडियो",
+    "दूसरा वीडियो",
+    "पहला वीडियो",
+)
+
+def is_fact_check_article(article_data) -> bool:
+    for ctype, text in article_data or []:
+        if ctype != "heading":
+            continue
+        lower = (text or "").strip().lower()
+        if any(marker in lower for marker in FACTCHECK_HEADLINE_MARKERS):
+            return True
+
+    return any(
+        any(marker in (text or "") for marker in FACTCHECK_CONCLUSION_MARKERS)
+        for ctype, text in (article_data or [])
+        if ctype == "paragraph"
+    )
+
+def is_fact_process_sentence(sentence: str) -> bool:
+    lower = (sentence or "").strip().lower()
+    return any(marker.lower() in lower for marker in FACT_PROCESS_MARKERS)
+
+def is_low_value_fact_sentence(sentence: str) -> bool:
+    lower = (sentence or "").strip().lower()
+    compact = re.sub(r"\s+", " ", lower)
+    if re.fullmatch(r"(डिजिटल\s+डेस्क[, ]+)?[^\s,]+[, ]+[^\s,]+", compact):
+        return True
+    if len(sentence.split()) < 6:
+        return True
+    return False
+
+def is_material_fact_candidate(sentence: str) -> bool:
+    sent = (sentence or "").strip()
+    if len(sent) < 35:
+        return False
+    if re.search(r"\d", sent):
+        return True
+    if any(token in sent for token in ("कहा", "बताया", "अनुसार", "मुताबिक", "जारी", "है", "हैं", "था", "थे")):
+        return True
+    return False
+
 def extract_fact_statements(article_data):
     statements = []
     seen = set()
+    fact_check_mode = is_fact_check_article(article_data)
+    lead_paragraphs_taken = 0
+
+    def add_sentence(sent: str):
+        key = canon_hi(sent)
+        if key in seen:
+            return
+        seen.add(key)
+        statements.append(sent)
 
     for ctype, text in article_data:
         if ctype not in {"heading", "paragraph", "table"}:
             continue
 
+        if fact_check_mode:
+            if ctype == "heading":
+                lower_heading = (text or "").strip().lower()
+                if any(marker in lower_heading for marker in FACTCHECK_HEADLINE_MARKERS):
+                    add_sentence(text.strip())
+                continue
+
+            if is_fact_process_sentence(text):
+                continue
+
+            if any(marker in text for marker in FACTCHECK_CONCLUSION_MARKERS):
+                for sent in split_hindi_sentences(text):
+                    if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
+                        continue
+                    if is_hindi_fact_sentence(sent):
+                        add_sentence(sent)
+                continue
+
+            if ctype == "paragraph" and lead_paragraphs_taken < 3:
+                lead_paragraphs_taken += 1
+                for sent in split_hindi_sentences(text):
+                    if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
+                        continue
+                    if is_hindi_fact_sentence(sent) and is_material_fact_candidate(sent):
+                        add_sentence(sent)
+            continue
+
         for sent in split_hindi_sentences(text):
             if not is_hindi_fact_sentence(sent):
                 continue
-
-            key = canon_hi(sent)
-            if key in seen:
+            if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
                 continue
-
-            seen.add(key)
-            statements.append(sent)
+            if not is_material_fact_candidate(sent):
+                continue
+            add_sentence(sent)
 
     return statements
 
