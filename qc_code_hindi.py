@@ -1322,6 +1322,18 @@ DOMAIN_ARTICLE_SELECTORS = {
         ".post-content",
         ".description",
     ],
+    "vishvasnews.com": [
+        ".lhs-area .view-full",
+        ".lhs-area",
+        ".repeated_article_area",
+        "article",
+    ],
+    "www.vishvasnews.com": [
+        ".lhs-area .view-full",
+        ".lhs-area",
+        ".repeated_article_area",
+        "article",
+    ],
 }
 
 EXCLUDED_SUBTREE_SELECTORS = [
@@ -1403,6 +1415,10 @@ def should_skip_extracted_text(text: str) -> bool:
     if is_probable_metadata_line(compact):
         return True
     if lower.startswith("यह भी पढ़ें"):
+        return True
+    if lower.startswith("बायो:"):
+        return True
+    if "पढ़ने के लिए यहां क्लिक करें" in lower:
         return True
     if lower.startswith("...और पढ़ें") or lower.startswith("और पढ़ें"):
         return True
@@ -1491,6 +1507,9 @@ def get_domain(url: str) -> str:
 def is_jagran_domain(url: str) -> bool:
     return get_domain(url) in {"jagran.com", "www.jagran.com"}
 
+def is_vishvasnews_domain(url: str) -> bool:
+    return get_domain(url) in {"vishvasnews.com", "www.vishvasnews.com"}
+
 def has_inline_read_more(raw_text: str) -> bool:
     compact = re.sub(r"\s+", " ", (raw_text or "").strip())
     return "...और पढ़ें" in compact or compact.endswith("और पढ़ें")
@@ -1538,6 +1557,41 @@ def is_sufficient_article_body(content) -> bool:
     paragraphs = [text for ctype, text in content if ctype == "paragraph"]
     total_chars = sum(len(text) for text in paragraphs)
     return len(paragraphs) >= 2 and total_chars >= 250
+
+def text_seen_or_overlapping(text: str, seen, ctype: str | None = None, content=None) -> bool:
+    norm_txt = normalize_for_match(text)
+    if not norm_txt:
+        return True
+    if ctype == "heading" and content:
+        for existing_ctype, existing in content:
+            existing_norm = normalize_for_match(existing)
+            if not existing_norm:
+                continue
+            if norm_txt == existing_norm:
+                return True
+            if existing_ctype == "heading" and (norm_txt in existing_norm or existing_norm in norm_txt):
+                return True
+        return False
+    for existing in seen:
+        existing_norm = normalize_for_match(existing)
+        if not existing_norm:
+            continue
+        if norm_txt == existing_norm or norm_txt in existing_norm or existing_norm in norm_txt:
+            return True
+    return False
+
+def append_unique_content(content, seen, ctype: str, raw_text: str) -> bool:
+    txt = sanitize_extracted_text(raw_text)
+    min_len = 4 if ctype == "heading" else 20 if ctype == "paragraph" else 5
+    if len(txt) < min_len:
+        return False
+    if should_skip_extracted_text(txt):
+        return False
+    if text_seen_or_overlapping(txt, seen, ctype=ctype, content=content):
+        return False
+    seen.add(txt)
+    content.append((ctype, txt))
+    return True
 
 def extend_content_from_container(container, content, seen):
     clone = BeautifulSoup(str(container), "html.parser")
@@ -1622,6 +1676,59 @@ def extend_content_from_container(container, content, seen):
         if para in seen or not should_add_text_candidate(para):
             continue
         append_text("heading" if is_heading_like_hi(para) else "paragraph", para)
+
+VISHVASNEWS_STOP_CLASSES = {
+    "reviews",
+    "fact-approved",
+    "our_sources",
+    "pura-sach",
+    "related-articles",
+    "contribute",
+    "comments",
+    "comments-area",
+    "submit-btn",
+}
+
+def extract_from_vishvasnews(soup, content, seen):
+    lhs = soup.select_one(".lhs-area")
+    if not lhs:
+        return
+
+    summary = lhs.select_one(":scope > p.summery")
+    if summary:
+        append_unique_content(content, seen, "paragraph", summary.get_text(separator=" ", strip=True))
+
+    body = lhs.select_one(":scope > .view-full")
+    if not body:
+        return
+
+    for child in body.find_all(recursive=False):
+        classes = set(child.get("class", []))
+        if classes & VISHVASNEWS_STOP_CLASSES:
+            break
+        if child.name in {"script", "style", "noscript", "input"}:
+            continue
+        if child.name in {"div", "section"} and any(cls in {"add-box", "view-more-btn"} for cls in classes):
+            continue
+        if child.name in {"h2", "h3", "h4", "h5", "h6"}:
+            append_unique_content(content, seen, "heading", child.get_text(separator=" ", strip=True))
+            continue
+        if child.name == "p":
+            append_unique_content(content, seen, "paragraph", child.get_text(separator=" ", strip=True))
+            continue
+        if child.name in {"ul", "ol"}:
+            for li in child.find_all("li", recursive=False):
+                append_unique_content(content, seen, "paragraph", li.get_text(separator=" ", strip=True))
+            continue
+        if child.name == "table":
+            for tr in child.find_all("tr"):
+                cells = [
+                    c.get_text(separator=" ", strip=True)
+                    for c in tr.find_all(["th", "td"])
+                ]
+                cells = [re.sub(r"\s+", " ", c).strip() for c in cells if c.strip()]
+                if cells:
+                    append_unique_content(content, seen, "table", " | ".join(cells))
 
 def extract_from_article_roots(soup, url, content, seen):
     roots = []
@@ -1775,6 +1882,11 @@ def clean_article(url):
         if h1_text:
             content.append(("heading", h1_text))
             seen.add(h1_text)
+
+    if is_vishvasnews_domain(url):
+        extract_from_vishvasnews(soup, content, seen)
+        if is_sufficient_article_body(content):
+            return content
 
     if is_jagran_domain(url):
         extract_from_json_article_body(soup, content, seen)
@@ -2543,6 +2655,47 @@ def tokenize_for_diff(text: str):
 def highlight_diff_pair(original: str, corrected: str):
     original_tokens = tokenize_for_diff(original or "")
     corrected_tokens = tokenize_for_diff(corrected or "")
+
+    if normalize_for_equality(original) == normalize_for_equality(corrected):
+        return html.escape(original or ""), html.escape(corrected or "")
+
+    prefix_len = 0
+    max_prefix = min(len(original_tokens), len(corrected_tokens))
+    while prefix_len < max_prefix and original_tokens[prefix_len] == corrected_tokens[prefix_len]:
+        prefix_len += 1
+
+    suffix_len = 0
+    max_suffix = min(len(original_tokens) - prefix_len, len(corrected_tokens) - prefix_len)
+    while (
+        suffix_len < max_suffix
+        and original_tokens[len(original_tokens) - 1 - suffix_len]
+        == corrected_tokens[len(corrected_tokens) - 1 - suffix_len]
+    ):
+        suffix_len += 1
+
+    if prefix_len or suffix_len:
+        original_prefix = "".join(original_tokens[:prefix_len])
+        corrected_prefix = "".join(corrected_tokens[:prefix_len])
+        original_middle = "".join(original_tokens[prefix_len: len(original_tokens) - suffix_len if suffix_len else len(original_tokens)])
+        corrected_middle = "".join(corrected_tokens[prefix_len: len(corrected_tokens) - suffix_len if suffix_len else len(corrected_tokens)])
+        original_suffix = "".join(original_tokens[len(original_tokens) - suffix_len:]) if suffix_len else ""
+        corrected_suffix = "".join(corrected_tokens[len(corrected_tokens) - suffix_len:]) if suffix_len else ""
+
+        if original_middle or corrected_middle:
+            original_parts = [html.escape(original_prefix)]
+            corrected_parts = [html.escape(corrected_prefix)]
+            if original_middle:
+                original_parts.append(
+                    f'<span class="qc-diff qc-diff-original">{html.escape(original_middle)}</span>'
+                )
+            if corrected_middle:
+                corrected_parts.append(
+                    f'<span class="qc-diff qc-diff-corrected">{html.escape(corrected_middle)}</span>'
+                )
+            original_parts.append(html.escape(original_suffix))
+            corrected_parts.append(html.escape(corrected_suffix))
+            return "".join(original_parts), "".join(corrected_parts)
+
     matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens)
 
     original_parts = []
