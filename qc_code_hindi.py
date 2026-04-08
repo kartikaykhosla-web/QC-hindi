@@ -745,15 +745,22 @@ def compute_qc_score(spelling_count: int, grammar_count: int, editorial_count: i
     )
     return max(0, min(100, int(round(100 - min(100, weighted_penalty)))))
 
-def render_qc_score_summary(spelling_count: int, grammar_count: int, editorial_count: int, fact_count: int, has_ai_error: bool):
+def count_article_words(article_data) -> int:
+    text = "\n".join(
+        t for c, t in (article_data or []) if c in {"heading", "paragraph", "table"}
+    )
+    return len(re.findall(r"\S+", text))
+
+def render_qc_score_summary(spelling_count: int, grammar_count: int, editorial_count: int, fact_count: int, has_ai_error: bool, word_count: int | None = None):
     st.markdown("### QC Summary")
     if has_ai_error:
         st.warning("QC score is unavailable because one or more AI checks failed.")
         return
     total_count = spelling_count + grammar_count + editorial_count + fact_count
     score = compute_qc_score(spelling_count, grammar_count, editorial_count, fact_count)
-    score_col, spelling_col, grammar_col, editorial_col, fact_col, total_col = st.columns(6)
+    score_col, word_col, spelling_col, grammar_col, editorial_col, fact_col, total_col = st.columns(7)
     score_col.metric("QC Score", f"{score}/100")
+    word_col.metric("Words", word_count if word_count is not None else 0)
     spelling_col.metric("Spelling", spelling_count)
     grammar_col.metric("Grammar", grammar_count)
     editorial_col.metric("Editorial", editorial_count)
@@ -2175,6 +2182,15 @@ def is_no_issue_fact(issue: str, correction: str) -> bool:
         return True
     return False
 
+def is_current_verification_issue(issue: str) -> bool:
+    lower = (issue or "").strip().lower()
+    return "needs verification" in lower and "current" in lower
+
+def normalize_fact_correction(issue: str, correction: str, today_iso: str) -> str:
+    if is_current_verification_issue(issue):
+        return f"Could not verify reliably as of {today_iso}."
+    return (correction or "").strip()
+
 def is_style_only_fact(statement: str, issue: str, correction: str) -> bool:
     lower_issue = (issue or "").strip().lower()
     lower_correction = (correction or "").strip().lower()
@@ -3392,7 +3408,9 @@ Rules:
 - Never rely on stale model memory when grounded search results are missing or disagree.
 - Only flag factual problems: direct contradictions, impossible combinations, outdated current-affairs claims, or statements that remain unverified after grounded search.
 - Do not flag style, wording, naming preference, branding simplification, abbreviation expansion, punctuation, or grammar as factual issues.
-- If grounded search is insufficient for a time-sensitive statement, use Issue as "Needs verification (current)" and say "Could not verify as of {today_iso}" in Correct Fact.
+- Use "Needs verification (current)" only as a last resort for a materially important current-affairs claim whose present status cannot be verified reliably.
+- If grounded search is merely sparse, mixed, or not clearly authoritative for a minor claim, omit the row instead of emitting "Needs verification (current)".
+- If you do use "Needs verification (current)", the Correct Fact must be exactly: "Could not verify reliably as of {today_iso}."
 - If a statement appears supported, omit it.
 
 Return table:
@@ -3441,6 +3459,8 @@ STATEMENTS:
                 continue
             if is_style_only_fact(s, i, c):
                 continue
+
+            c = normalize_fact_correction(i, c, today_iso)
 
             sig = (canon_hi(s), canon_hi(i))
             if sig in seen:
@@ -3611,6 +3631,7 @@ if not IMPORT_ONLY:
             editorial_count,
             fact_count,
             any(is_ai_error_output(value) for value in (raw, editorial_raw, fact_result)),
+            count_article_words(qc_content),
         )
 
         st.markdown("### ✍️ Spelling Issues")
