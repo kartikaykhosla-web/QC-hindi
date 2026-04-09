@@ -2311,6 +2311,13 @@ def is_generic_verification_fact(issue: str, correction: str, today_iso: str) ->
         "needs verification" in issue_lower or "outdated current-affairs claim" in issue_lower
     )
 
+def fact_issue_cluster_key(issue: str, correction: str, today_iso: str):
+    issue_norm = canon_hi(issue)
+    correction_norm = canon_hi(normalize_fact_correction(issue, correction, today_iso))
+    if not issue_norm or not correction_norm:
+        return None
+    return (issue_norm, correction_norm)
+
 def is_style_only_fact(statement: str, issue: str, correction: str) -> bool:
     lower_issue = (issue or "").strip().lower()
     lower_correction = (correction or "").strip().lower()
@@ -3692,6 +3699,7 @@ def gemini_fact_check(article_data):
 
     rows = []
     seen = set()
+    seen_clusters = set()
     had_success = False
     last_error = None
     today_iso = datetime.now(timezone.utc).date().isoformat()
@@ -3769,12 +3777,17 @@ STATEMENTS:
                 continue
 
             c = normalize_fact_correction(i, c, today_iso)
+            cluster_key = fact_issue_cluster_key(i, c, today_iso)
+            if cluster_key and cluster_key in seen_clusters:
+                continue
 
             sig = (canon_hi(s), canon_hi(i))
             if sig in seen:
                 continue
 
             seen.add(sig)
+            if cluster_key:
+                seen_clusters.add(cluster_key)
             rows.append(f"| {s} | {i} | {c} |")
 
         if len(seen) >= 10:
