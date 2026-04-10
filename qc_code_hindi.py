@@ -2311,6 +2311,61 @@ def is_generic_verification_fact(issue: str, correction: str, today_iso: str) ->
         "needs verification" in issue_lower or "outdated current-affairs claim" in issue_lower
     )
 
+def is_dynamic_schedule_or_pricing_fact(statement: str, issue: str, correction: str) -> bool:
+    combined = " ".join(filter(None, [statement, issue, correction])).lower()
+    dynamic_markers = (
+        "पैकेज",
+        "package",
+        "tour package",
+        "package fee",
+        "package fare",
+        "प्रति व्यक्ति",
+        "fare",
+        "price",
+        "fees",
+        "pricing",
+        "बुक",
+        "booking",
+        "departure",
+        "upcoming date",
+        "journey",
+        "starts on",
+        "शुरुआत",
+        "तारीख",
+        "every saturday",
+        "every sunday",
+        "departs",
+        "traveling together",
+        "single occupancy",
+        "child with a bed",
+        "sl berths",
+        "3ac",
+    )
+    issue_markers = (
+        "current price",
+        "claim is outdated",
+        "price is different",
+        "fee is different",
+        "upcoming date",
+        "date of journey",
+        "claim is unverified",
+        "the current price",
+        "the current package fee",
+    )
+    return any(marker in combined for marker in dynamic_markers) and any(
+        marker in combined for marker in issue_markers
+    )
+
+def is_self_conflicting_fact_correction(statement: str, issue: str, correction: str) -> bool:
+    correction_lower = (correction or "").strip().lower()
+    if not correction_lower:
+        return False
+    if "but also" in correction_lower or "however" in correction_lower:
+        return True
+    if "upcoming date" in correction_lower and "every saturday" in correction_lower:
+        return True
+    return False
+
 def fact_issue_cluster_key(issue: str, correction: str, today_iso: str):
     issue_norm = canon_hi(issue)
     correction_norm = canon_hi(normalize_fact_correction(issue, correction, today_iso))
@@ -2833,6 +2888,7 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.platypus.doctemplate import LayoutError
     except Exception:
         return None, "PDF export requires the `reportlab` package."
 
@@ -2863,6 +2919,8 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
         fontSize=9.5,
         leading=13,
         textColor=colors.HexColor("#111827"),
+        splitLongWords=1,
+        wordWrap="CJK",
     )
     heading_style = ParagraphStyle(
         "qc-heading",
@@ -2875,11 +2933,17 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
         spaceAfter=6,
     )
 
-    def p(text):
-        safe = html.escape((text or "").replace("\n", " "))
+    def pdf_cell_text(text, max_chars=260):
+        value = re.sub(r"\s+", " ", (text or "")).strip()
+        if len(value) > max_chars:
+            value = value[: max_chars - 16].rstrip() + " ...[truncated]"
+        return value
+
+    def p(text, max_chars=260):
+        safe = html.escape(pdf_cell_text(text, max_chars=max_chars))
         return Paragraph(safe, body_style)
 
-    def add_table(story, title, headers, rows, column_widths):
+    def add_table(story, title, headers, rows, column_widths, cell_limits=None):
         story.append(Paragraph(title, heading_style))
         if not rows:
             story.append(Paragraph("No issues found", body_style))
@@ -2888,7 +2952,13 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
 
         table_data = [[Paragraph(html.escape(h), body_style) for h in headers]]
         for row in rows:
-            table_data.append([p(cell) for cell in row])
+            prepared = []
+            for idx, cell in enumerate(row):
+                max_chars = 260
+                if cell_limits and idx < len(cell_limits) and cell_limits[idx]:
+                    max_chars = cell_limits[idx]
+                prepared.append(p(cell, max_chars=max_chars))
+            table_data.append(prepared)
 
         table = Table(table_data, colWidths=column_widths, repeatRows=1)
         table.setStyle(TableStyle([
@@ -2904,6 +2974,25 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
         story.append(table)
         story.append(Spacer(1, 0.25 * cm))
 
+    def add_stacked_rows(story, title, headers, rows, cell_limits=None):
+        story.append(Paragraph(title, heading_style))
+        if not rows:
+            story.append(Paragraph("No issues found", body_style))
+            story.append(Spacer(1, 0.2 * cm))
+            return
+
+        for idx, row in enumerate(rows, start=1):
+            story.append(Paragraph(f"<b>Item {idx}</b>", body_style))
+            for col_idx, header in enumerate(headers):
+                text = row[col_idx] if col_idx < len(row) else ""
+                max_chars = 220
+                if cell_limits and col_idx < len(cell_limits) and cell_limits[col_idx]:
+                    max_chars = cell_limits[col_idx]
+                safe = html.escape(pdf_cell_text(text, max_chars=max_chars))
+                story.append(Paragraph(f"<b>{html.escape(header)}:</b> {safe}", body_style))
+            story.append(Spacer(1, 0.2 * cm))
+        story.append(Spacer(1, 0.1 * cm))
+
     fact_rows = parse_markdown_table_rows(fact_md, 3)
     summary_rows = [
         ["Source", source_label or "-"],
@@ -2915,28 +3004,58 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
         ["Fact check issues", str(len(fact_rows))],
     ]
 
+    def requires_stacked_layout():
+        all_rows = list(spelling_rows or []) + list(grammar_rows or []) + list(editorial_rows or []) + list(fact_rows or [])
+        if len(all_rows) > 18:
+            return True
+        for row in all_rows:
+            for cell in row:
+                if len(re.sub(r"\s+", " ", str(cell or "")).strip()) > 180:
+                    return True
+        return False
+
+    def build_story(use_fallback=False):
+        story = [
+            Paragraph("Hindi QC Report", title_style),
+            Spacer(1, 0.25 * cm),
+        ]
+        add_table(story, "Summary", ["Field", "Value"], summary_rows, [4.2 * cm, 12.4 * cm], [90, 220])
+        if use_fallback:
+            add_stacked_rows(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [180, 180, 110])
+            add_stacked_rows(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [180, 180, 110])
+            add_stacked_rows(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [110, 60, 170, 190])
+            add_stacked_rows(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [170, 110, 190])
+        else:
+            add_table(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm], [180, 180, 110])
+            add_table(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm], [180, 180, 110])
+            add_table(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [3.2 * cm, 2.4 * cm, 5.2 * cm, 6.0 * cm], [110, 60, 170, 190])
+            add_table(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [6.0 * cm, 4.0 * cm, 6.8 * cm], [170, 110, 190])
+        return story
+
+    def make_doc(buffer):
+        return SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            rightMargin=1.2 * cm,
+            leftMargin=1.2 * cm,
+            topMargin=1.2 * cm,
+            bottomMargin=1.2 * cm,
+        )
+
+    use_fallback = requires_stacked_layout()
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=1.2 * cm,
-        leftMargin=1.2 * cm,
-        topMargin=1.2 * cm,
-        bottomMargin=1.2 * cm,
-    )
-
-    story = [
-        Paragraph("Hindi QC Report", title_style),
-        Spacer(1, 0.25 * cm),
-    ]
-
-    add_table(story, "Summary", ["Field", "Value"], summary_rows, [4.2 * cm, 12.4 * cm])
-    add_table(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm])
-    add_table(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm])
-    add_table(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [3.2 * cm, 2.4 * cm, 5.2 * cm, 6.0 * cm])
-    add_table(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [6.0 * cm, 4.0 * cm, 6.8 * cm])
-
-    doc.build(story)
+    try:
+        make_doc(buffer).build(build_story(use_fallback=use_fallback))
+    except LayoutError:
+        buffer = io.BytesIO()
+        try:
+            make_doc(buffer).build(build_story(use_fallback=True))
+        except LayoutError:
+            return None, "PDF export could not fit very long QC rows on the page."
+        except Exception:
+            return None, "PDF export failed while rendering long QC rows."
+    except Exception:
+        return None, "PDF export failed while generating the report."
     return buffer.getvalue(), None
 
 def split_spelling_grammar_hi(table_md):
@@ -3717,11 +3836,14 @@ Rules:
 - Use Google Search grounding for up-to-date verification.
 - Quote exact text from the article under "Statement".
 - Do not paraphrase the article text.
+- Return "Issue" and "Correct Fact" in the same language as the article text.
 - For present-tense or current-status claims, verify against information available as of today's date.
 - For explicitly dated historical claims, evaluate them against the date or time period stated in the article, not against today's date.
 - Never rely on stale model memory when grounded search results are missing or disagree.
 - Only flag factual problems: direct contradictions, impossible combinations, outdated current-affairs claims, or statements that remain unverified after grounded search.
 - Do not flag style, wording, naming preference, branding simplification, abbreviation expansion, punctuation, or grammar as factual issues.
+- Omit dynamic commercial or schedule rows (package fares, booking prices, departure schedules, "upcoming date", product/package fees) unless an authoritative source clearly contradicts the same package and the same effective date.
+- Never infer a contradiction from recurring schedule metadata alone when the article cites a specific dated departure.
 - Use "Needs verification (current)" only as a last resort for a materially important current-affairs claim whose present status cannot be verified reliably.
 - If grounded search is merely sparse, mixed, or not clearly authoritative for a minor claim, omit the row instead of emitting "Needs verification (current)".
 - If you do use "Needs verification (current)", the Correct Fact must be exactly: "Could not verify reliably as of {today_iso}."
@@ -3767,6 +3889,8 @@ STATEMENTS:
         for s, i, c in matches:
             if s.lower() == "statement" or i.lower() == "issue" or c.lower() == "correct fact":
                 continue
+            if all(re.fullmatch(r":?-{2,}:?", (x or "").strip()) for x in (s, i, c)):
+                continue
             if any(x.strip() in {"-", "--", "---"} for x in (s, i, c)):
                 continue
             if is_no_issue_fact(i, c):
@@ -3774,6 +3898,10 @@ STATEMENTS:
             if is_style_only_fact(s, i, c):
                 continue
             if is_generic_verification_fact(i, c, today_iso):
+                continue
+            if is_dynamic_schedule_or_pricing_fact(s, i, c):
+                continue
+            if is_self_conflicting_fact_correction(s, i, c):
                 continue
 
             c = normalize_fact_correction(i, c, today_iso)
