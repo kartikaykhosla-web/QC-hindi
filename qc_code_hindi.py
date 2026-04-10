@@ -2380,6 +2380,15 @@ def visible_word_signature_hi(text: str):
         if token
     )
 
+HINDI_GRAMMAR_FORM_TOKENS = {
+    "है", "हैं", "था", "थे", "थी", "थीं",
+    "होगा", "होगी", "होंगे", "होगे",
+    "हुआ", "हुई", "हुए",
+    "किया", "किए", "की", "किये",
+    "गया", "गई", "गए", "गये",
+    "रहा", "रही", "रहे",
+}
+
 def is_visible_noop_spelling_correction(original: str, corrected: str, reason: str) -> bool:
     if not is_spelling_like_reason(reason):
         return False
@@ -2388,6 +2397,23 @@ def is_visible_noop_spelling_correction(original: str, corrected: str, reason: s
     if not original_signature or not corrected_signature:
         return False
     return original_signature == corrected_signature
+
+def is_likely_grammar_form_change(original: str, corrected: str) -> bool:
+    original_tokens = [normalise_hi(token) for token in word_tokens_hi(original) if normalise_hi(token)]
+    corrected_tokens = [normalise_hi(token) for token in word_tokens_hi(corrected) if normalise_hi(token)]
+    if not original_tokens or not corrected_tokens:
+        return False
+    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens, autojunk=False)
+    changed_tokens = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        changed_tokens.extend(original_tokens[i1:i2])
+        changed_tokens.extend(corrected_tokens[j1:j2])
+    changed_tokens = [token for token in changed_tokens if token]
+    if not changed_tokens or len(changed_tokens) > 4:
+        return False
+    return all(token in HINDI_GRAMMAR_FORM_TOKENS for token in changed_tokens)
 
 def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str) -> bool:
     original_tokens = word_tokens_hi(original)
@@ -2863,6 +2889,12 @@ def is_spelling_reason(reason: str) -> bool:
 
 def classify_language_issue(original, corrected, reason):
     if is_spelling_reason(reason):
+        if is_visible_noop_spelling_correction(original, corrected, reason):
+            return "grammar"
+        if visible_word_signature_hi(original) == visible_word_signature_hi(corrected):
+            return "grammar"
+        if is_likely_grammar_form_change(original, corrected):
+            return "grammar"
         return "spelling"
     if is_hindi_spelling_issue(original, corrected):
         return "spelling"
