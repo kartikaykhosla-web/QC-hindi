@@ -2064,19 +2064,22 @@ def split_hindi_sentences(text: str):
 # =================================================
 # CANONICAL NORMALISERS (EXPLICIT, LIKE ENGLISH)
 # =================================================
+def _unicode_norm(text: str) -> str:
+    return unicodedata.normalize("NFC", text or "")
+
 def canon_hi(text: str) -> str:
-    t = text.lower().strip()
+    t = _unicode_norm(text).lower().strip()
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r"[।,;:!?]", "", t)
     return t
 
 def normalise_hi(text: str) -> str:
-    return re.sub(r"[^\w\u0900-\u097F]", "", text.lower())
+    return re.sub(r"[^\w\u0900-\u097F]", "", _unicode_norm(text).lower())
 
 def normalize_for_match(text: str) -> str:
     if not text:
         return ""
-    t = text.lower()
+    t = _unicode_norm(text).lower()
     t = re.sub(r"\s+", " ", t)
     t = t.replace("।", " ").replace(".", " ")
     t = re.sub(r"[\"'“”‘’]", "", t)
@@ -2118,7 +2121,8 @@ def strip_nukta_chars(text: str) -> str:
     return cleaned.replace("\u093c", "")
 
 def normalize_for_equality(text: str) -> str:
-    return re.sub(r"\s+", " ", normalize_quote_style((text or "").strip()))
+    normalized = _unicode_norm(normalize_quote_style((text or "").strip()))
+    return re.sub(r"\s+", " ", normalized)
 
 def is_noop_reason(reason: str) -> bool:
     lower = (reason or "").strip().lower()
@@ -2327,6 +2331,40 @@ def is_token_equivalent_correction(original: str, corrected: str, reason: str) -
         "विराम",
     ))
 
+
+def is_spelling_like_reason(reason: str) -> bool:
+    lower = (reason or "").strip().lower()
+    return any(marker in lower for marker in (
+        "वर्तनी",
+        "spelling",
+        "orthography",
+        "house style",
+        "preferred spelling",
+        "loanword",
+        "transliteration",
+        "matra",
+    ))
+
+
+def is_unicode_equivalent_spelling_correction(original: str, corrected: str, reason: str) -> bool:
+    if not is_spelling_like_reason(reason):
+        return False
+    original_norm = normalise_hi(original)
+    corrected_norm = normalise_hi(corrected)
+    if not original_norm or not corrected_norm:
+        return False
+    if original_norm == corrected_norm:
+        return True
+    original_tokens = [normalise_hi(token) for token in word_tokens_hi(original)]
+    corrected_tokens = [normalise_hi(token) for token in word_tokens_hi(corrected)]
+    if original_tokens == corrected_tokens:
+        return True
+    if normalize_for_match(original) == normalize_for_match(corrected):
+        return True
+    if changed_word_token_count(original, corrected) == 0:
+        return True
+    return False
+
 def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str) -> bool:
     original_tokens = word_tokens_hi(original)
     corrected_tokens = word_tokens_hi(corrected)
@@ -2364,6 +2402,7 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
         is_bad_punctuation_spacing_correction(original, corrected, reason),
         is_redundant_gender_rewrite(original, corrected, reason),
         is_token_equivalent_correction(original, corrected, reason),
+        is_unicode_equivalent_spelling_correction(original, corrected, reason),
         is_ambiguous_homophone_correction(original, corrected, reason),
     ))
 
@@ -2414,6 +2453,7 @@ def is_dynamic_schedule_or_pricing_fact(statement: str, issue: str, correction: 
         "पैकेज",
         "package",
         "tour package",
+        "rail tour package",
         "package fee",
         "package fare",
         "प्रति व्यक्ति",
@@ -2437,6 +2477,21 @@ def is_dynamic_schedule_or_pricing_fact(statement: str, issue: str, correction: 
         "child with a bed",
         "sl berths",
         "3ac",
+        "duration",
+        "nights",
+        "days",
+        "every week",
+        "weekly",
+        "package details",
+        "destination covered",
+        "traveling mode",
+        "class",
+        "inclusions",
+        "hotel",
+        "meal",
+        "cab",
+        "train",
+        "upcoming date of journey",
     )
     issue_markers = (
         "current price",
@@ -2448,6 +2503,10 @@ def is_dynamic_schedule_or_pricing_fact(statement: str, issue: str, correction: 
         "claim is unverified",
         "the current price",
         "the current package fee",
+        "duration is different",
+        "current duration",
+        "current package",
+        "package is for",
     )
     return any(marker in combined for marker in dynamic_markers) and any(
         marker in combined for marker in issue_markers
@@ -3149,16 +3208,10 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
             Spacer(1, 0.25 * cm),
         ]
         add_table(story, "Summary", ["Field", "Value"], summary_rows, [4.2 * cm, 12.4 * cm], [90, 220])
-        if use_fallback:
-            add_stacked_rows(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [180, 180, 110])
-            add_stacked_rows(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [180, 180, 110])
-            add_stacked_rows(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [110, 60, 170, 190])
-            add_stacked_rows(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [170, 110, 190])
-        else:
-            add_table(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm], [180, 180, 110])
-            add_table(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm], [180, 180, 110])
-            add_table(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [3.2 * cm, 2.4 * cm, 5.2 * cm, 6.0 * cm], [110, 60, 170, 190])
-            add_table(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [6.0 * cm, 4.0 * cm, 6.8 * cm], [170, 110, 190])
+        add_stacked_rows(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [180, 180, 110])
+        add_stacked_rows(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [180, 180, 110])
+        add_stacked_rows(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [110, 60, 170, 190])
+        add_stacked_rows(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [170, 110, 190])
         return story
 
     def make_doc(buffer):
@@ -3171,18 +3224,11 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
             bottomMargin=1.2 * cm,
         )
 
-    use_fallback = requires_stacked_layout()
     buffer = io.BytesIO()
     try:
-        make_doc(buffer).build(build_story(use_fallback=use_fallback))
+        make_doc(buffer).build(build_story(use_fallback=True))
     except LayoutError:
-        buffer = io.BytesIO()
-        try:
-            make_doc(buffer).build(build_story(use_fallback=True))
-        except LayoutError:
-            return None, "PDF export could not fit very long QC rows on the page."
-        except Exception:
-            return None, "PDF export failed while rendering long QC rows."
+        return None, "PDF export could not fit very long QC rows on the page."
     except Exception:
         return None, "PDF export failed while generating the report."
     return buffer.getvalue(), None
@@ -3834,6 +3880,8 @@ def is_dynamic_schedule_or_pricing_sentence(sentence: str) -> bool:
         "package",
         "टूर",
         "tour",
+        "यात्रा",
+        "trip",
         "बुकिंग",
         "booking",
         "departure",
@@ -3851,13 +3899,68 @@ def is_dynamic_schedule_or_pricing_sentence(sentence: str) -> bool:
         "₹",
         "3ac",
         "sl berths",
+        "nights",
+        "days",
+        "duration",
+        "class",
+        "destination covered",
+        "traveling mode",
+        "every week",
+        "weekly",
+        "होटल",
+        "meal",
+        "inclusion",
+        "inclusions",
+        "रात",
+        "दिन",
+        "दिनों",
+        "सप्ताह",
+        "हर शनिवार",
+        "प्रस्थान",
+        "अवधि",
+        "क्लास",
+        "डेस्टिनेशन",
+        "ट्रेन",
+        "कैब",
+        "होटल-खाना",
+        "पर्यटन",
+        "irctc",
     )
     return any(marker in lower for marker in dynamic_markers) and (
         bool(re.search(r"\d", lower))
         or "शुरुआत" in lower
         or "depart" in lower
         or "upcoming" in lower
+        or "रात" in lower
+        or "दिन" in lower
+        or "duration" in lower
+        or "अवधि" in lower
+        or "every week" in lower
+        or "हर शनिवार" in lower
     )
+
+def is_dynamic_package_article(article_data) -> bool:
+    heading_text = " ".join(text for ctype, text in article_data if ctype == "heading")
+    body_text = "\n".join(text for ctype, text in article_data if ctype in {"paragraph", "table"})
+    combined = f"{heading_text}\n{body_text}".lower()
+    article_markers = (
+        "irctc", "package", "tour package", "rail tour package", "travel package",
+        "पैकेज", "टूर पैकेज", "रेल टूर", "traveling mode", "destination covered",
+        "package details", "upcoming date", "journey", "every week", "weekly", "itinerary",
+    )
+    marker_hits = sum(1 for marker in article_markers if marker in combined)
+    dynamic_sentences = 0
+    for ctype, text in article_data:
+        if ctype not in {"heading", "paragraph", "table"}:
+            continue
+        for sent in split_hindi_sentences(text):
+            if is_dynamic_schedule_or_pricing_sentence(sent):
+                dynamic_sentences += 1
+                if dynamic_sentences >= 3:
+                    break
+        if dynamic_sentences >= 3:
+            break
+    return marker_hits >= 3 and dynamic_sentences >= 3
 
 def should_keep_lead_fact_sentence(sentence: str) -> bool:
     sent = (sentence or "").strip()
@@ -3995,6 +4098,10 @@ def gemini_fact_check(article_data):
     if key in FACT_CACHE:
         return FACT_CACHE[key]
 
+    if is_dynamic_package_article(article_data):
+        FACT_CACHE[key] = ""
+        return ""
+
     statements = extract_fact_statements(article_data)
 
     if not statements:
@@ -4035,7 +4142,7 @@ Rules:
 - Never rely on stale model memory when grounded search results are missing or disagree.
 - Only flag factual problems: direct contradictions, impossible combinations, outdated current-affairs claims, or statements that remain unverified after grounded search.
 - Do not flag style, wording, naming preference, branding simplification, abbreviation expansion, punctuation, or grammar as factual issues.
-- Omit dynamic commercial or schedule rows (package fares, booking prices, departure schedules, "upcoming date", product/package fees) unless an authoritative source clearly contradicts the same package and the same effective date.
+- Omit dynamic commercial or travel-package rows (package fares, booking prices, departure schedules, "upcoming date", package duration, class, inclusion list, hotel/meal count, itinerary metadata, recurring weekly departures) unless an authoritative source clearly contradicts the same package and the same effective date.
 - Never infer a contradiction from recurring schedule metadata alone when the article cites a specific dated departure.
 - Use "Needs verification (current)" only as a last resort for a materially important current-affairs claim whose present status cannot be verified reliably.
 - If grounded search is merely sparse, mixed, or not clearly authoritative for a minor claim, omit the row instead of emitting "Needs verification (current)".
