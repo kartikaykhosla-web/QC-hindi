@@ -2127,6 +2127,10 @@ def normalize_for_equality(text: str) -> str:
 def visible_text_signature(text: str) -> str:
     normalized = normalize_quote_style(_unicode_norm((text or "").strip()))
     normalized = normalized.replace("\u200c", "").replace("\u200d", "").replace("\ufe0f", "")
+    normalized = "".join(
+        unit for unit in split_grapheme_like_units(normalized)
+        if any(unicodedata.category(ch)[0] != "M" for ch in unit)
+    )
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized
 
@@ -2913,6 +2917,7 @@ def split_grapheme_like_units(text: str):
 
         if (
             unicodedata.combining(ch)
+            or unicodedata.category(ch).startswith("M")
             or ch in {"\u200c", "\u200d", "\ufe0f", "\u094d"}
             or current.endswith(("\u094d", "\u200c", "\u200d"))
         ):
