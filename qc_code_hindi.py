@@ -2064,22 +2064,19 @@ def split_hindi_sentences(text: str):
 # =================================================
 # CANONICAL NORMALISERS (EXPLICIT, LIKE ENGLISH)
 # =================================================
-def _unicode_norm(text: str) -> str:
-    return unicodedata.normalize("NFC", text or "")
-
 def canon_hi(text: str) -> str:
-    t = _unicode_norm(text).lower().strip()
+    t = text.lower().strip()
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r"[।,;:!?]", "", t)
     return t
 
 def normalise_hi(text: str) -> str:
-    return re.sub(r"[^\w\u0900-\u097F]", "", _unicode_norm(text).lower())
+    return re.sub(r"[^\w\u0900-\u097F]", "", text.lower())
 
 def normalize_for_match(text: str) -> str:
     if not text:
         return ""
-    t = _unicode_norm(text).lower()
+    t = text.lower()
     t = re.sub(r"\s+", " ", t)
     t = t.replace("।", " ").replace(".", " ")
     t = re.sub(r"[\"'“”‘’]", "", t)
@@ -2121,31 +2118,7 @@ def strip_nukta_chars(text: str) -> str:
     return cleaned.replace("\u093c", "")
 
 def normalize_for_equality(text: str) -> str:
-    normalized = _unicode_norm(normalize_quote_style((text or "").strip()))
-    return re.sub(r"\s+", " ", normalized)
-
-def visible_text_signature(text: str) -> str:
-    normalized = normalize_quote_style(_unicode_norm((text or "").strip()))
-    normalized = normalized.replace("\u200c", "").replace("\u200d", "").replace("\ufe0f", "")
-    cleaned_units = []
-    for unit in split_grapheme_like_units(normalized):
-        visible_chars = [ch for ch in unit if unicodedata.category(ch)[0] != "M"]
-        if not visible_chars:
-            continue
-        cleaned_unit = "".join(visible_chars)
-        seen_marks = set()
-        trailing_marks = []
-        for ch in unit[len(cleaned_unit):]:
-            if unicodedata.category(ch)[0] != "M":
-                continue
-            if ch in seen_marks:
-                continue
-            seen_marks.add(ch)
-            trailing_marks.append(ch)
-        cleaned_units.append(cleaned_unit + "".join(trailing_marks))
-    normalized = "".join(cleaned_units)
-    normalized = re.sub(r"\s+", " ", normalized)
-    return normalized
+    return re.sub(r"\s+", " ", normalize_quote_style((text or "").strip()))
 
 def is_noop_reason(reason: str) -> bool:
     lower = (reason or "").strip().lower()
@@ -2160,9 +2133,6 @@ def is_noop_reason(reason: str) -> bool:
 
 def is_noop_correction(original: str, corrected: str) -> bool:
     return normalize_for_equality(original) == normalize_for_equality(corrected)
-
-def is_visually_identical_correction(original: str, corrected: str) -> bool:
-    return visible_text_signature(original) == visible_text_signature(corrected)
 
 def is_quote_only_correction(original: str, corrected: str) -> bool:
     original_base = normalize_for_equality(strip_quote_chars(original))
@@ -2357,110 +2327,6 @@ def is_token_equivalent_correction(original: str, corrected: str, reason: str) -
         "विराम",
     ))
 
-
-def is_spelling_like_reason(reason: str) -> bool:
-    lower = (reason or "").strip().lower()
-    return any(marker in lower for marker in (
-        "वर्तनी",
-        "spelling",
-        "orthography",
-        "house style",
-        "preferred spelling",
-        "loanword",
-        "transliteration",
-        "matra",
-    ))
-
-
-def is_unicode_equivalent_spelling_correction(original: str, corrected: str, reason: str) -> bool:
-    if not is_spelling_like_reason(reason):
-        return False
-    original_norm = normalise_hi(original)
-    corrected_norm = normalise_hi(corrected)
-    if not original_norm or not corrected_norm:
-        return False
-    if original_norm == corrected_norm:
-        return True
-    original_tokens = [normalise_hi(token) for token in word_tokens_hi(original)]
-    corrected_tokens = [normalise_hi(token) for token in word_tokens_hi(corrected)]
-    if original_tokens == corrected_tokens:
-        return True
-    if normalize_for_match(original) == normalize_for_match(corrected):
-        return True
-    if changed_word_token_count(original, corrected) == 0:
-        return True
-    return False
-
-def visible_word_signature_hi(text: str):
-    return tuple(
-        token for token in (normalise_hi(sanitized_word_token_hi(token)) for token in word_tokens_hi(text))
-        if token
-    )
-
-def sanitized_word_token_hi(token: str) -> str:
-    units = []
-    for unit in split_grapheme_like_units(_unicode_norm(token or "")):
-        if classify_diff_unit(unit) != "word":
-            continue
-        visible_chars = [ch for ch in unit if unicodedata.category(ch)[0] != "M"]
-        if not visible_chars:
-            continue
-        cleaned_unit = "".join(visible_chars)
-        seen_marks = set()
-        trailing_marks = []
-        for ch in unit[len(cleaned_unit):]:
-            if unicodedata.category(ch)[0] != "M":
-                continue
-            if ch in seen_marks:
-                continue
-            seen_marks.add(ch)
-            trailing_marks.append(ch)
-        units.append(cleaned_unit + "".join(trailing_marks))
-    return "".join(units)
-
-HINDI_GRAMMAR_FORM_TOKENS = {
-    "है", "हैं", "था", "थे", "थी", "थीं",
-    "होगा", "होगी", "होंगे", "होगे",
-    "हुआ", "हुई", "हुए",
-    "किया", "किए", "की", "किये",
-    "गया", "गई", "गए", "गये",
-    "रहा", "रही", "रहे",
-}
-
-def is_visible_noop_spelling_correction(original: str, corrected: str, reason: str) -> bool:
-    if not is_spelling_like_reason(reason):
-        return False
-    original_signature = visible_word_signature_hi(original)
-    corrected_signature = visible_word_signature_hi(corrected)
-    if not original_signature or not corrected_signature:
-        return False
-    return original_signature == corrected_signature
-
-def is_likely_grammar_form_change(original: str, corrected: str) -> bool:
-    original_tokens = [normalise_hi(token) for token in word_tokens_hi(original) if normalise_hi(token)]
-    corrected_tokens = [normalise_hi(token) for token in word_tokens_hi(corrected) if normalise_hi(token)]
-    if not original_tokens or not corrected_tokens:
-        return False
-    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens, autojunk=False)
-    changed_tokens = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        changed_tokens.extend(original_tokens[i1:i2])
-        changed_tokens.extend(corrected_tokens[j1:j2])
-    changed_tokens = [token for token in changed_tokens if token]
-    if not changed_tokens or len(changed_tokens) > 4:
-        return False
-    return all(token in HINDI_GRAMMAR_FORM_TOKENS for token in changed_tokens)
-
-def is_punctuation_only_correction(original: str, corrected: str) -> bool:
-    if normalize_for_match(original) != normalize_for_match(corrected):
-        return False
-
-    original_tokens = [normalise_hi(sanitized_word_token_hi(token)) for token in word_tokens_hi(original)]
-    corrected_tokens = [normalise_hi(sanitized_word_token_hi(token)) for token in word_tokens_hi(corrected)]
-    return tuple(token for token in original_tokens if token) == tuple(token for token in corrected_tokens if token)
-
 def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str) -> bool:
     original_tokens = word_tokens_hi(original)
     corrected_tokens = word_tokens_hi(corrected)
@@ -2490,7 +2356,6 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
     return any((
         is_noop_reason(reason),
         is_noop_correction(original, corrected),
-        is_visually_identical_correction(original, corrected),
         is_quote_only_correction(original, corrected),
         is_nukta_only_correction(original, corrected, reason),
         is_heading_danda_correction(original, corrected, reason),
@@ -2499,8 +2364,6 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
         is_bad_punctuation_spacing_correction(original, corrected, reason),
         is_redundant_gender_rewrite(original, corrected, reason),
         is_token_equivalent_correction(original, corrected, reason),
-        is_unicode_equivalent_spelling_correction(original, corrected, reason),
-        is_visible_noop_spelling_correction(original, corrected, reason),
         is_ambiguous_homophone_correction(original, corrected, reason),
     ))
 
@@ -2551,7 +2414,6 @@ def is_dynamic_schedule_or_pricing_fact(statement: str, issue: str, correction: 
         "पैकेज",
         "package",
         "tour package",
-        "rail tour package",
         "package fee",
         "package fare",
         "प्रति व्यक्ति",
@@ -2575,21 +2437,6 @@ def is_dynamic_schedule_or_pricing_fact(statement: str, issue: str, correction: 
         "child with a bed",
         "sl berths",
         "3ac",
-        "duration",
-        "nights",
-        "days",
-        "every week",
-        "weekly",
-        "package details",
-        "destination covered",
-        "traveling mode",
-        "class",
-        "inclusions",
-        "hotel",
-        "meal",
-        "cab",
-        "train",
-        "upcoming date of journey",
     )
     issue_markers = (
         "current price",
@@ -2601,10 +2448,6 @@ def is_dynamic_schedule_or_pricing_fact(statement: str, issue: str, correction: 
         "claim is unverified",
         "the current price",
         "the current package fee",
-        "duration is different",
-        "current duration",
-        "current package",
-        "package is for",
     )
     return any(marker in combined for marker in dynamic_markers) and any(
         marker in combined for marker in issue_markers
@@ -2891,18 +2734,7 @@ def is_hindi_spelling_issue(original, corrected):
     )
 
 def word_tokens_hi(text: str):
-    tokens = []
-    current = []
-    for unit in split_grapheme_like_units(_unicode_norm(text or "")):
-        if classify_diff_unit(unit) == "word":
-            current.append(unit)
-            continue
-        if current:
-            tokens.append("".join(current))
-            current = []
-    if current:
-        tokens.append("".join(current))
-    return tokens
+    return re.findall(r"[A-Za-z0-9\u0900-\u097F]+", text or "")
 
 def changed_word_token_count(original: str, corrected: str) -> int:
     original_tokens = [normalise_hi(token) for token in word_tokens_hi(original)]
@@ -2945,17 +2777,7 @@ def is_spelling_reason(reason: str) -> bool:
     ))
 
 def classify_language_issue(original, corrected, reason):
-    if is_visually_identical_correction(original, corrected):
-        return "grammar"
-    if is_punctuation_only_correction(original, corrected):
-        return "grammar"
-    if is_likely_grammar_form_change(original, corrected):
-        return "grammar"
     if is_spelling_reason(reason):
-        if is_visible_noop_spelling_correction(original, corrected, reason):
-            return "grammar"
-        if visible_word_signature_hi(original) == visible_word_signature_hi(corrected):
-            return "grammar"
         return "spelling"
     if is_hindi_spelling_issue(original, corrected):
         return "spelling"
@@ -2974,7 +2796,6 @@ def split_grapheme_like_units(text: str):
 
         if (
             unicodedata.combining(ch)
-            or unicodedata.category(ch).startswith("M")
             or ch in {"\u200c", "\u200d", "\ufe0f", "\u094d"}
             or current.endswith(("\u094d", "\u200c", "\u200d"))
         ):
@@ -3146,14 +2967,8 @@ def render_language_table(rows):
         """.strip()
     ]
 
-    rendered_any = False
     for original, corrected, reason in rows:
-        if is_visually_identical_correction(original, corrected):
-            continue
-        if is_visible_noop_spelling_correction(original, corrected, reason):
-            continue
         original_html, corrected_html = highlight_diff_pair(original, corrected)
-        rendered_any = True
         lines.append(
             "<tr>"
             f"<td>{original_html}</td>"
@@ -3162,8 +2977,6 @@ def render_language_table(rows):
             "</tr>"
         )
 
-    if not rendered_any:
-        return ""
     lines.append("</tbody></table>")
     return "\n".join(lines)
 
@@ -3336,10 +3149,16 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
             Spacer(1, 0.25 * cm),
         ]
         add_table(story, "Summary", ["Field", "Value"], summary_rows, [4.2 * cm, 12.4 * cm], [90, 220])
-        add_stacked_rows(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [180, 180, 110])
-        add_stacked_rows(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [180, 180, 110])
-        add_stacked_rows(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [110, 60, 170, 190])
-        add_stacked_rows(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [170, 110, 190])
+        if use_fallback:
+            add_stacked_rows(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [180, 180, 110])
+            add_stacked_rows(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [180, 180, 110])
+            add_stacked_rows(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [110, 60, 170, 190])
+            add_stacked_rows(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [170, 110, 190])
+        else:
+            add_table(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm], [180, 180, 110])
+            add_table(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows or [], [6.1 * cm, 6.1 * cm, 4.4 * cm], [180, 180, 110])
+            add_table(story, "Gemini Editorial Review", ["Issue", "Location", "Excerpt", "Corrected Text"], editorial_rows or [], [3.2 * cm, 2.4 * cm, 5.2 * cm, 6.0 * cm], [110, 60, 170, 190])
+            add_table(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [6.0 * cm, 4.0 * cm, 6.8 * cm], [170, 110, 190])
         return story
 
     def make_doc(buffer):
@@ -3352,11 +3171,18 @@ def build_hindi_qc_report_pdf(source_label: str, user_email: str, spelling_rows,
             bottomMargin=1.2 * cm,
         )
 
+    use_fallback = requires_stacked_layout()
     buffer = io.BytesIO()
     try:
-        make_doc(buffer).build(build_story(use_fallback=True))
+        make_doc(buffer).build(build_story(use_fallback=use_fallback))
     except LayoutError:
-        return None, "PDF export could not fit very long QC rows on the page."
+        buffer = io.BytesIO()
+        try:
+            make_doc(buffer).build(build_story(use_fallback=True))
+        except LayoutError:
+            return None, "PDF export could not fit very long QC rows on the page."
+        except Exception:
+            return None, "PDF export failed while rendering long QC rows."
     except Exception:
         return None, "PDF export failed while generating the report."
     return buffer.getvalue(), None
@@ -3512,8 +3338,6 @@ def build_language_tables(language_rows, editorial_rows=None):
         if not original or not corrected or not reason:
             continue
         if should_skip_language_change(original, corrected, reason):
-            continue
-        if is_visible_noop_spelling_correction(original, corrected, reason):
             continue
 
         key = (canon_hi(original), canon_hi(corrected), canon_hi(reason))
@@ -4010,8 +3834,6 @@ def is_dynamic_schedule_or_pricing_sentence(sentence: str) -> bool:
         "package",
         "टूर",
         "tour",
-        "यात्रा",
-        "trip",
         "बुकिंग",
         "booking",
         "departure",
@@ -4029,68 +3851,13 @@ def is_dynamic_schedule_or_pricing_sentence(sentence: str) -> bool:
         "₹",
         "3ac",
         "sl berths",
-        "nights",
-        "days",
-        "duration",
-        "class",
-        "destination covered",
-        "traveling mode",
-        "every week",
-        "weekly",
-        "होटल",
-        "meal",
-        "inclusion",
-        "inclusions",
-        "रात",
-        "दिन",
-        "दिनों",
-        "सप्ताह",
-        "हर शनिवार",
-        "प्रस्थान",
-        "अवधि",
-        "क्लास",
-        "डेस्टिनेशन",
-        "ट्रेन",
-        "कैब",
-        "होटल-खाना",
-        "पर्यटन",
-        "irctc",
     )
     return any(marker in lower for marker in dynamic_markers) and (
         bool(re.search(r"\d", lower))
         or "शुरुआत" in lower
         or "depart" in lower
         or "upcoming" in lower
-        or "रात" in lower
-        or "दिन" in lower
-        or "duration" in lower
-        or "अवधि" in lower
-        or "every week" in lower
-        or "हर शनिवार" in lower
     )
-
-def is_dynamic_package_article(article_data) -> bool:
-    heading_text = " ".join(text for ctype, text in article_data if ctype == "heading")
-    body_text = "\n".join(text for ctype, text in article_data if ctype in {"paragraph", "table"})
-    combined = f"{heading_text}\n{body_text}".lower()
-    article_markers = (
-        "irctc", "package", "tour package", "rail tour package", "travel package",
-        "पैकेज", "टूर पैकेज", "रेल टूर", "traveling mode", "destination covered",
-        "package details", "upcoming date", "journey", "every week", "weekly", "itinerary",
-    )
-    marker_hits = sum(1 for marker in article_markers if marker in combined)
-    dynamic_sentences = 0
-    for ctype, text in article_data:
-        if ctype not in {"heading", "paragraph", "table"}:
-            continue
-        for sent in split_hindi_sentences(text):
-            if is_dynamic_schedule_or_pricing_sentence(sent):
-                dynamic_sentences += 1
-                if dynamic_sentences >= 3:
-                    break
-        if dynamic_sentences >= 3:
-            break
-    return marker_hits >= 3 and dynamic_sentences >= 3
 
 def should_keep_lead_fact_sentence(sentence: str) -> bool:
     sent = (sentence or "").strip()
@@ -4105,20 +3872,69 @@ def should_keep_lead_fact_sentence(sentence: str) -> bool:
 def extract_fact_statements(article_data):
     statements = []
     seen = set()
+    fact_check_mode = is_fact_check_article(article_data)
+    lead_paragraphs_taken = 0
+    main_heading_added = False
+
+    def add_sentence(sent: str):
+        key = canon_hi(sent)
+        if key in seen:
+            return
+        seen.add(key)
+        statements.append(sent)
+
     for ctype, text in article_data:
-        if ctype not in {"paragraph", "table"}:
+        if ctype not in {"heading", "paragraph", "table"}:
+            continue
+
+        if ctype == "heading":
+            heading_text = (text or "").strip()
+            lower_heading = heading_text.lower()
+            if not main_heading_added and len(heading_text.split()) >= 4:
+                add_sentence(heading_text)
+                main_heading_added = True
+            elif fact_check_mode and any(marker in lower_heading for marker in FACTCHECK_HEADLINE_MARKERS):
+                add_sentence(heading_text)
+            continue
+
+        if fact_check_mode:
+            if is_fact_process_sentence(text):
+                continue
+
+            if any(marker in text for marker in FACTCHECK_CONCLUSION_MARKERS):
+                for sent in split_hindi_sentences(text):
+                    if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
+                        continue
+                    if is_dynamic_schedule_or_pricing_sentence(sent):
+                        continue
+                    if is_hindi_fact_sentence(sent):
+                        add_sentence(sent)
+                continue
+
+            if ctype == "paragraph" and lead_paragraphs_taken < 5:
+                lead_paragraphs_taken += 1
+                for sent in split_hindi_sentences(text):
+                    if should_keep_lead_fact_sentence(sent):
+                        add_sentence(sent)
+            continue
+
+        if ctype == "paragraph" and lead_paragraphs_taken < 5:
+            lead_paragraphs_taken += 1
+            for sent in split_hindi_sentences(text):
+                if should_keep_lead_fact_sentence(sent):
+                    add_sentence(sent)
             continue
 
         for sent in split_hindi_sentences(text):
             if not is_hindi_fact_sentence(sent):
                 continue
-
-            key = canon_hi(sent)
-            if key in seen:
+            if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
                 continue
-
-            seen.add(key)
-            statements.append(sent)
+            if is_dynamic_schedule_or_pricing_sentence(sent):
+                continue
+            if not is_material_fact_candidate(sent):
+                continue
+            add_sentence(sent)
 
     return statements
 
@@ -4187,44 +4003,77 @@ def gemini_fact_check(article_data):
     full_text = "\n".join(
         text for ctype, text in article_data if ctype in {"heading", "paragraph", "table"}
     )
+    publication_date = get_article_publication_date(article_data)
+    publication_date_context = (
+        f"Article publication date: {publication_date}\n"
+        if publication_date else ""
+    )
+
     rows = []
     seen = set()
+    seen_clusters = set()
     had_success = False
     last_error = None
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    client = init_vertex_and_model()
 
     for batch in chunked(statements, 5):
         block = "\n".join(f"- {s}" for s in batch)
 
         PROMPT = f"""
-You are an internal factual consistency auditor.
+You are an internal factual accuracy auditor for current news copy.
+
+Today's date: {today_iso}
 
 Rules:
-- Treat TEXT as closed
-- No external knowledge
+- Use Google Search grounding for up-to-date verification.
 - Quote exact text from the article under "Statement".
-- No paraphrasing
-- Only flag direct contradictions, impossible combinations, or statements that are unsupported by the article itself.
+- Do not paraphrase the article text.
+- Return "Issue" and "Correct Fact" in the same language as the article text.
+- For present-tense or current-status claims, verify against information available as of today's date.
+- For explicitly dated historical claims, evaluate them against the date or time period stated in the article, not against today's date.
+- Never rely on stale model memory when grounded search results are missing or disagree.
+- Only flag factual problems: direct contradictions, impossible combinations, outdated current-affairs claims, or statements that remain unverified after grounded search.
 - Do not flag style, wording, naming preference, branding simplification, abbreviation expansion, punctuation, or grammar as factual issues.
+- Omit dynamic commercial or schedule rows (package fares, booking prices, departure schedules, "upcoming date", product/package fees) unless an authoritative source clearly contradicts the same package and the same effective date.
+- Never infer a contradiction from recurring schedule metadata alone when the article cites a specific dated departure.
+- Use "Needs verification (current)" only as a last resort for a materially important current-affairs claim whose present status cannot be verified reliably.
+- If grounded search is merely sparse, mixed, or not clearly authoritative for a minor claim, omit the row instead of emitting "Needs verification (current)".
+- If you do use "Needs verification (current)", the Correct Fact must be exactly: "Could not verify reliably as of {today_iso}."
+- If a statement appears supported, omit it.
 
 Return table:
 | Statement | Issue | Correct Fact |
 
 TEXT:
-{full_text}
+{publication_date_context}{full_text}
+
+ARTICLE METADATA RULES:
+- If the article publication date is provided above, treat month-only or relative references such as "अप्रैल में" in the article as belonging to that publication month/year unless the statement itself clearly specifies another year.
+- Never claim that the article was published in a different year than the provided publication date.
+- If grounded sources are mixed but the only disagreement is about the article's publication year, omit the row instead of inventing an older publication date.
 
 STATEMENTS:
 {block}
 """
 
         try:
-            out = generate_text(
-                PROMPT,
-                generation_config={
-                    "temperature": 0,
-                    "top_p": 1,
-                    "max_output_tokens": 512
-                },
+            response = client.models.generate_content(
+                model=MODEL_FLASH,
+                contents=PROMPT,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0,
+                    topP=1,
+                    topK=1,
+                    candidateCount=1,
+                    maxOutputTokens=768,
+                    seed=0,
+                    responseMimeType="text/plain",
+                    thinkingConfig=genai_types.ThinkingConfig(thinkingBudget=0),
+                    tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                ),
             )
+            out = response.text or ""
             had_success = True
         except Exception as exc:
             last_error = exc
@@ -4238,13 +4087,26 @@ STATEMENTS:
         for s, i, c in matches:
             if s.lower() == "statement" or i.lower() == "issue" or c.lower() == "correct fact":
                 continue
-            if any(x.strip() in {"-", "--", "---"} for x in (s, i, c)):
-                continue
             if all(re.fullmatch(r":?-{2,}:?", (x or "").strip()) for x in (s, i, c)):
+                continue
+            if any(x.strip() in {"-", "--", "---"} for x in (s, i, c)):
                 continue
             if is_no_issue_fact(i, c):
                 continue
             if is_style_only_fact(s, i, c):
+                continue
+            if is_generic_verification_fact(i, c, today_iso):
+                continue
+            if is_dynamic_schedule_or_pricing_fact(s, i, c):
+                continue
+            if is_self_conflicting_fact_correction(s, i, c):
+                continue
+            if is_publication_date_conflict_fact(i, c, article_data):
+                continue
+
+            c = normalize_fact_correction(i, c, today_iso)
+            cluster_key = fact_issue_cluster_key(i, c, today_iso)
+            if cluster_key and cluster_key in seen_clusters:
                 continue
 
             sig = (canon_hi(s), canon_hi(i))
@@ -4252,6 +4114,8 @@ STATEMENTS:
                 continue
 
             seen.add(sig)
+            if cluster_key:
+                seen_clusters.add(cluster_key)
             rows.append(f"| {s} | {i} | {c} |")
 
         if len(seen) >= 10:
