@@ -1152,7 +1152,7 @@ RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-PROMPT_VERSION_HI = "2026-04-01-2"
+PROMPT_VERSION_HI = "2026-04-10-1"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -1188,6 +1188,8 @@ def load_hindi_rule_pairs():
             continue
         pairs.append((wrong, correct))
     return pairs
+
+ARTICLE_PUBLISHED_META_PREFIX = "__PUBLISHED_DATE__:"
 
 # =================================================
 # MODEL INIT (PARALLEL TO ENGLISH)
@@ -1764,6 +1766,75 @@ def decode_ldjson_string(value: str) -> str:
     text = text.replace('\\"', '"').replace("\\/", "/").replace("\\\\", "\\")
     return text
 
+def normalize_published_date(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", raw)
+    if match:
+        return match.group(1)
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).date().isoformat()
+    except Exception:
+        return ""
+
+def extract_article_publish_date(soup) -> str:
+    meta_candidates = [
+        ("meta", attrs, attr_name)
+        for attrs, attr_name in (
+            ({"property": "article:published_time"}, "content"),
+            ({"name": "article:published_time"}, "content"),
+            ({"property": "og:published_time"}, "content"),
+            ({"name": "publish-date"}, "content"),
+            ({"name": "publish_date"}, "content"),
+            ({"name": "date"}, "content"),
+        )
+    ]
+
+    for _, attrs, attr_name in meta_candidates:
+        tag = soup.find("meta", attrs=attrs)
+        if not tag:
+            continue
+        normalized = normalize_published_date(tag.get(attr_name, ""))
+        if normalized:
+            return normalized
+
+    for script in soup.find_all("script", {"type": "application/ld+json"}):
+        raw_script = script.string or script.get_text() or ""
+        if not raw_script:
+            continue
+        try:
+            data = json.loads(raw_script)
+        except Exception:
+            matches = re.findall(r'"datePublished"\s*:\s*"([^"]+)"', raw_script)
+            for candidate in matches:
+                normalized = normalize_published_date(candidate)
+                if normalized:
+                    return normalized
+            continue
+
+        stack = [data]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                normalized = normalize_published_date(str(current.get("datePublished", "")))
+                if normalized:
+                    return normalized
+                stack.extend(current.values())
+            elif isinstance(current, list):
+                stack.extend(current)
+
+    return ""
+
+def get_article_publication_date(article_data) -> str:
+    for ctype, text in article_data or []:
+        if ctype != "meta":
+            continue
+        if (text or "").startswith(ARTICLE_PUBLISHED_META_PREFIX):
+            return text[len(ARTICLE_PUBLISHED_META_PREFIX):].strip()
+    return ""
+
 def extract_text_fields_from_ldjson_raw(raw_script: str):
     fields = []
     if not raw_script:
@@ -1875,6 +1946,10 @@ def clean_article(url):
 
     content = []
     seen = set()
+    publish_date = extract_article_publish_date(soup)
+
+    if publish_date:
+        content.append(("meta", f"{ARTICLE_PUBLISHED_META_PREFIX}{publish_date}"))
 
     h1 = soup.find("h1")
     if h1:
@@ -2231,6 +2306,27 @@ def is_redundant_gender_rewrite(original: str, corrected: str, reason: str) -> b
 
     return True
 
+def is_token_equivalent_correction(original: str, corrected: str, reason: str) -> bool:
+    original_tokens = [normalise_hi(token) for token in word_tokens_hi(original)]
+    corrected_tokens = [normalise_hi(token) for token in word_tokens_hi(corrected)]
+    if not original_tokens or not corrected_tokens:
+        return False
+    if original_tokens != corrected_tokens:
+        return False
+
+    reason_lower = (reason or "").strip().lower()
+    return any(marker in reason_lower for marker in (
+        "वर्तनी",
+        "spelling",
+        "house style",
+        "style",
+        "punctuation",
+        "headline punctuation",
+        "comma",
+        "spacing",
+        "विराम",
+    ))
+
 def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str) -> bool:
     original_tokens = word_tokens_hi(original)
     corrected_tokens = word_tokens_hi(corrected)
@@ -2267,6 +2363,7 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
         is_self_contradictory_reason(original, corrected, reason),
         is_bad_punctuation_spacing_correction(original, corrected, reason),
         is_redundant_gender_rewrite(original, corrected, reason),
+        is_token_equivalent_correction(original, corrected, reason),
         is_ambiguous_homophone_correction(original, corrected, reason),
     ))
 
@@ -2366,6 +2463,37 @@ def is_self_conflicting_fact_correction(statement: str, issue: str, correction: 
         return True
     return False
 
+def is_publication_date_conflict_fact(issue: str, correction: str, article_data) -> bool:
+    publication_date = get_article_publication_date(article_data)
+    if not publication_date:
+        return False
+
+    article_year = publication_date[:4]
+    combined = f"{issue or ''} {correction or ''}".lower()
+    if not any(marker in combined for marker in (
+        "article was published",
+        "published in",
+        "published on",
+        "publication date",
+        "this article was published",
+    )):
+        return False
+
+    correction_text = correction or ""
+    explicit_match = re.search(
+        r"(?:published\s+(?:in|on)|publication date[^0-9]{0,20})(?:[^0-9]{0,20})(20\d{2})",
+        correction_text,
+        flags=re.IGNORECASE,
+    )
+    if explicit_match:
+        return explicit_match.group(1) != article_year
+
+    years = re.findall(r"\b(20\d{2})\b", correction_text)
+    if not years:
+        return False
+
+    return article_year not in years
+
 def fact_issue_cluster_key(issue: str, correction: str, today_iso: str):
     issue_norm = canon_hi(issue)
     correction_norm = canon_hi(normalize_fact_correction(issue, correction, today_iso))
@@ -2382,6 +2510,7 @@ def is_style_only_fact(statement: str, issue: str, correction: str) -> bool:
         return True
 
     style_markers = (
+        "typo",
         "spelling",
         "grammar",
         "punctuation",
@@ -3609,6 +3738,8 @@ FACTCHECK_CONCLUSION_MARKERS = (
 FACT_PROCESS_MARKERS = (
     "आर्काइव लिंक",
     "archive link",
+    "इसे भी पढ़ें",
+    "यह भी पढ़ें",
     "यूजर",
     "उपयोगकर्ता",
     "पोस्ट करते हुए लिखा",
@@ -3638,6 +3769,11 @@ FACT_PROCESS_MARKERS = (
     "एक अन्य वीडियो",
     "दूसरा वीडियो",
     "पहला वीडियो",
+    "हम आप तक सही जानकारी",
+    "हमारा उद्देश्य",
+    "स्टोरी अच्छी लगी",
+    "इसे शेयर जरूर करें",
+    "विशेषज्ञ से परामर्श लें",
 )
 
 def is_fact_check_article(article_data) -> bool:
@@ -3663,6 +3799,18 @@ def is_low_value_fact_sentence(sentence: str) -> bool:
     compact = re.sub(r"\s+", " ", lower)
     if re.fullmatch(r"(डिजिटल\s+डेस्क[, ]+)?[^\s,]+[, ]+[^\s,]+", compact):
         return True
+    if any(marker in lower for marker in (
+        "इसे भी पढ़ें",
+        "यह भी पढ़ें",
+        "हमारा उद्देश्य",
+        "सही जानकारी",
+        "स्टोरी अच्छी लगी",
+        "इसे शेयर",
+        "सामान्य जानकारी",
+        "विशेषज्ञ से परामर्श",
+        "ट्रेवल टिप्स और रिव्यू",
+    )):
+        return True
     if len(sentence.split()) < 6:
         return True
     return False
@@ -3677,11 +3825,47 @@ def is_material_fact_candidate(sentence: str) -> bool:
         return True
     return False
 
+def is_dynamic_schedule_or_pricing_sentence(sentence: str) -> bool:
+    lower = (sentence or "").strip().lower()
+    if not lower:
+        return False
+    dynamic_markers = (
+        "पैकेज",
+        "package",
+        "टूर",
+        "tour",
+        "बुकिंग",
+        "booking",
+        "departure",
+        "journey",
+        "upcoming date",
+        "प्रति व्यक्ति",
+        "कीमत",
+        "price",
+        "fare",
+        "fees",
+        "फीस",
+        "शनिवार",
+        "अप्रैल",
+        "रुपये",
+        "₹",
+        "3ac",
+        "sl berths",
+    )
+    return any(marker in lower for marker in dynamic_markers) and (
+        bool(re.search(r"\d", lower))
+        or "शुरुआत" in lower
+        or "depart" in lower
+        or "upcoming" in lower
+    )
+
 def should_keep_lead_fact_sentence(sentence: str) -> bool:
     sent = (sentence or "").strip()
     if len(sent) < 25:
         return False
     if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
+        return False
+    if is_dynamic_schedule_or_pricing_sentence(sent):
         return False
     return is_hindi_fact_sentence(sent) or is_material_fact_candidate(sent)
 
@@ -3721,6 +3905,8 @@ def extract_fact_statements(article_data):
                 for sent in split_hindi_sentences(text):
                     if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
                         continue
+                    if is_dynamic_schedule_or_pricing_sentence(sent):
+                        continue
                     if is_hindi_fact_sentence(sent):
                         add_sentence(sent)
                 continue
@@ -3743,6 +3929,8 @@ def extract_fact_statements(article_data):
             if not is_hindi_fact_sentence(sent):
                 continue
             if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
+                continue
+            if is_dynamic_schedule_or_pricing_sentence(sent):
                 continue
             if not is_material_fact_candidate(sent):
                 continue
@@ -3815,6 +4003,11 @@ def gemini_fact_check(article_data):
     full_text = "\n".join(
         text for ctype, text in article_data if ctype in {"heading", "paragraph", "table"}
     )
+    publication_date = get_article_publication_date(article_data)
+    publication_date_context = (
+        f"Article publication date: {publication_date}\n"
+        if publication_date else ""
+    )
 
     rows = []
     seen = set()
@@ -3853,7 +4046,12 @@ Return table:
 | Statement | Issue | Correct Fact |
 
 TEXT:
-{full_text}
+{publication_date_context}{full_text}
+
+ARTICLE METADATA RULES:
+- If the article publication date is provided above, treat month-only or relative references such as "अप्रैल में" in the article as belonging to that publication month/year unless the statement itself clearly specifies another year.
+- Never claim that the article was published in a different year than the provided publication date.
+- If grounded sources are mixed but the only disagreement is about the article's publication year, omit the row instead of inventing an older publication date.
 
 STATEMENTS:
 {block}
@@ -3902,6 +4100,8 @@ STATEMENTS:
             if is_dynamic_schedule_or_pricing_fact(s, i, c):
                 continue
             if is_self_conflicting_fact_correction(s, i, c):
+                continue
+            if is_publication_date_conflict_fact(i, c, article_data):
                 continue
 
             c = normalize_fact_correction(i, c, today_iso)
@@ -4024,7 +4224,9 @@ if not IMPORT_ONLY:
         qc_content = run_pipeline(article_content)
 
         st.subheader("📄 Final Article")
-        for _, t in qc_content:
+        for ctype, t in qc_content:
+            if ctype == "meta":
+                continue
             st.write(t)
 
         st.divider()
@@ -4115,14 +4317,17 @@ if not IMPORT_ONLY:
         else:
             st.markdown(fact_result)
 
-        report_pdf_bytes, report_pdf_error = build_hindi_qc_report_pdf(
-            source_label or (url.strip() if source == "URL" and url else current_key or "QC Report"),
-            _current_access_email(),
-            spelling_table,
-            grammar_table,
-            editorial_rows,
-            fact_result,
-        )
+        try:
+            report_pdf_bytes, report_pdf_error = build_hindi_qc_report_pdf(
+                source_label or (url.strip() if source == "URL" and url else current_key or "QC Report"),
+                _current_access_email(),
+                spelling_table,
+                grammar_table,
+                editorial_rows,
+                fact_result,
+            )
+        except Exception as exc:
+            report_pdf_bytes, report_pdf_error = None, f"PDF export failed safely: {type(exc).__name__}"
 
         if report_pdf_bytes:
             st.download_button(
