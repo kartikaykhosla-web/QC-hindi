@@ -2124,6 +2124,12 @@ def normalize_for_equality(text: str) -> str:
     normalized = _unicode_norm(normalize_quote_style((text or "").strip()))
     return re.sub(r"\s+", " ", normalized)
 
+def visible_text_signature(text: str) -> str:
+    normalized = normalize_quote_style(_unicode_norm((text or "").strip()))
+    normalized = normalized.replace("\u200c", "").replace("\u200d", "").replace("\ufe0f", "")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
 def is_noop_reason(reason: str) -> bool:
     lower = (reason or "").strip().lower()
     return lower in {
@@ -2137,6 +2143,9 @@ def is_noop_reason(reason: str) -> bool:
 
 def is_noop_correction(original: str, corrected: str) -> bool:
     return normalize_for_equality(original) == normalize_for_equality(corrected)
+
+def is_visually_identical_correction(original: str, corrected: str) -> bool:
+    return visible_text_signature(original) == visible_text_signature(corrected)
 
 def is_quote_only_correction(original: str, corrected: str) -> bool:
     original_base = normalize_for_equality(strip_quote_chars(original))
@@ -2409,6 +2418,7 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
     return any((
         is_noop_reason(reason),
         is_noop_correction(original, corrected),
+        is_visually_identical_correction(original, corrected),
         is_quote_only_correction(original, corrected),
         is_nukta_only_correction(original, corrected, reason),
         is_heading_danda_correction(original, corrected, reason),
@@ -3044,6 +3054,8 @@ def render_language_table(rows):
 
     rendered_any = False
     for original, corrected, reason in rows:
+        if is_visually_identical_correction(original, corrected):
+            continue
         if is_visible_noop_spelling_correction(original, corrected, reason):
             continue
         original_html, corrected_html = highlight_diff_pair(original, corrected)
