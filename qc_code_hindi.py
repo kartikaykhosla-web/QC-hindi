@@ -1152,7 +1152,7 @@ RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-PROMPT_VERSION_HI = "2026-04-10-1"
+PROMPT_VERSION_HI = "2026-04-10-2"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -2365,6 +2365,15 @@ def is_unicode_equivalent_spelling_correction(original: str, corrected: str, rea
         return True
     return False
 
+def has_no_visible_word_change(original: str, corrected: str) -> bool:
+    if normalize_for_match(original) == normalize_for_match(corrected):
+        return True
+    original_words = [normalize_for_match(token) for token in word_tokens_hi(original)]
+    corrected_words = [normalize_for_match(token) for token in word_tokens_hi(corrected)]
+    original_words = [token for token in original_words if token]
+    corrected_words = [token for token in corrected_words if token]
+    return bool(original_words) and original_words == corrected_words
+
 def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str) -> bool:
     original_tokens = word_tokens_hi(original)
     corrected_tokens = word_tokens_hi(corrected)
@@ -2394,6 +2403,7 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
     return any((
         is_noop_reason(reason),
         is_noop_correction(original, corrected),
+        has_no_visible_word_change(original, corrected),
         is_quote_only_correction(original, corrected),
         is_nukta_only_correction(original, corrected, reason),
         is_heading_danda_correction(original, corrected, reason),
@@ -3944,9 +3954,12 @@ def is_dynamic_package_article(article_data) -> bool:
     body_text = "\n".join(text for ctype, text in article_data if ctype in {"paragraph", "table"})
     combined = f"{heading_text}\n{body_text}".lower()
     article_markers = (
-        "irctc", "package", "tour package", "rail tour package", "travel package",
-        "पैकेज", "टूर पैकेज", "रेल टूर", "traveling mode", "destination covered",
-        "package details", "upcoming date", "journey", "every week", "weekly", "itinerary",
+        "irctc", "irctc tourism", "package", "tour package", "rail tour package", "travel package",
+        "package code", "package details", "upcoming date", "upcoming date of journey", "journey",
+        "every week", "weekly", "itinerary", "traveling mode", "destination covered", "duration",
+        "nights", "days", "departure", "inclusions",
+        "पैकेज", "टूर पैकेज", "रेल टूर", "पैकेज कोड", "पैकेज डिटेल्स", "यात्रा की तिथि",
+        "प्रस्थान", "अवधि", "रात", "दिन", "डेस्टिनेशन", "सुविधाएं", "होटल", "भोजन",
     )
     marker_hits = sum(1 for marker in article_markers if marker in combined)
     dynamic_sentences = 0
