@@ -2365,6 +2365,21 @@ def is_unicode_equivalent_spelling_correction(original: str, corrected: str, rea
         return True
     return False
 
+def visible_word_signature_hi(text: str):
+    return tuple(
+        token for token in (normalise_hi(token) for token in word_tokens_hi(text))
+        if token
+    )
+
+def is_visible_noop_spelling_correction(original: str, corrected: str, reason: str) -> bool:
+    if not is_spelling_like_reason(reason):
+        return False
+    original_signature = visible_word_signature_hi(original)
+    corrected_signature = visible_word_signature_hi(corrected)
+    if not original_signature or not corrected_signature:
+        return False
+    return original_signature == corrected_signature
+
 def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str) -> bool:
     original_tokens = word_tokens_hi(original)
     corrected_tokens = word_tokens_hi(corrected)
@@ -2403,6 +2418,7 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
         is_redundant_gender_rewrite(original, corrected, reason),
         is_token_equivalent_correction(original, corrected, reason),
         is_unicode_equivalent_spelling_correction(original, corrected, reason),
+        is_visible_noop_spelling_correction(original, corrected, reason),
         is_ambiguous_homophone_correction(original, corrected, reason),
     ))
 
@@ -3026,8 +3042,12 @@ def render_language_table(rows):
         """.strip()
     ]
 
+    rendered_any = False
     for original, corrected, reason in rows:
+        if is_visible_noop_spelling_correction(original, corrected, reason):
+            continue
         original_html, corrected_html = highlight_diff_pair(original, corrected)
+        rendered_any = True
         lines.append(
             "<tr>"
             f"<td>{original_html}</td>"
@@ -3036,6 +3056,8 @@ def render_language_table(rows):
             "</tr>"
         )
 
+    if not rendered_any:
+        return ""
     lines.append("</tbody></table>")
     return "\n".join(lines)
 
@@ -3384,6 +3406,8 @@ def build_language_tables(language_rows, editorial_rows=None):
         if not original or not corrected or not reason:
             continue
         if should_skip_language_change(original, corrected, reason):
+            continue
+        if is_visible_noop_spelling_correction(original, corrected, reason):
             continue
 
         key = (canon_hi(original), canon_hi(corrected), canon_hi(reason))
