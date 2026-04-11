@@ -2515,6 +2515,37 @@ def rewrite_religious_year_context_fact(statement: str, issue: str, correction: 
         f"यह संदर्भ {article_year} का है; तिथि के साथ {article_year} स्पष्ट रूप से लिखें।",
     )
 
+def build_religious_year_context_rows(statements, article_data):
+    publication_date = get_article_publication_date(article_data)
+    if not publication_date:
+        return []
+    article_year = publication_date[:4]
+    rows = []
+    seen = set()
+    for statement in statements or []:
+        text = (statement or "").strip()
+        if not text:
+            continue
+        lower = text.lower()
+        if not any(marker in lower for marker in ("इस साल", "इस वर्ष")):
+            continue
+        if not is_religious_calendar_claim(text):
+            continue
+        if not re.search(r"\d{1,2}\s*(?:अप्रैल|मई|जून|जुलाई|अगस्त|सितंबर|अक्टूबर|नवंबर|दिसंबर)", text):
+            continue
+        sig = canon_hi(text)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        rows.append(
+            (
+                text,
+                "वर्ष का संदर्भ स्पष्ट नहीं है; तिथि के साथ वर्ष भी लिखना चाहिए।",
+                f"यह संदर्भ {article_year} का है; तिथि के साथ {article_year} स्पष्ट रूप से लिखें।",
+            )
+        )
+    return rows
+
 def is_self_conflicting_fact_correction(statement: str, issue: str, correction: str) -> bool:
     correction_lower = (correction or "").strip().lower()
     if not correction_lower:
@@ -4327,6 +4358,19 @@ STATEMENTS:
 
     if not rows and not had_success:
         return format_ai_error("fact", last_error or RuntimeError("No Gemini response"))
+
+    deterministic_rows = build_religious_year_context_rows(statements, article_data)
+    for s, i, c in deterministic_rows:
+        sig = (canon_hi(s), canon_hi(i))
+        if sig in seen:
+            continue
+        cluster_key = fact_issue_cluster_key(i, c, today_iso)
+        if cluster_key and cluster_key in seen_clusters:
+            continue
+        seen.add(sig)
+        if cluster_key:
+            seen_clusters.add(cluster_key)
+        rows.append(f"| {s} | {i} | {c} |")
 
     if not rows:
         return ""
