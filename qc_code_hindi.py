@@ -1152,7 +1152,7 @@ RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-PROMPT_VERSION_HI = "2026-04-10-1"
+PROMPT_VERSION_HI = "2026-04-11-4"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -2327,6 +2327,9 @@ def is_token_equivalent_correction(original: str, corrected: str, reason: str) -
         "विराम",
     ))
 
+def is_visually_identical_correction(original: str, corrected: str) -> bool:
+    return visible_text_signature(original) == visible_text_signature(corrected)
+
 def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str) -> bool:
     original_tokens = word_tokens_hi(original)
     corrected_tokens = word_tokens_hi(corrected)
@@ -2356,6 +2359,7 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
     return any((
         is_noop_reason(reason),
         is_noop_correction(original, corrected),
+        is_visually_identical_correction(original, corrected),
         is_quote_only_correction(original, corrected),
         is_nukta_only_correction(original, corrected, reason),
         is_heading_danda_correction(original, corrected, reason),
@@ -2733,8 +2737,93 @@ def is_hindi_spelling_issue(original, corrected):
         original != corrected
     )
 
+def split_grapheme_like_units(text: str):
+    units = []
+    current = ""
+
+    for ch in unicodedata.normalize("NFC", text or ""):
+        if not current:
+            current = ch
+            continue
+
+        category = unicodedata.category(ch)
+        if (
+            category.startswith("M")
+            or ch in {"\u200c", "\u200d", "\ufe0f", "\u094d"}
+            or current.endswith(("\u094d", "\u200c", "\u200d"))
+        ):
+            current += ch
+            continue
+
+        units.append(current)
+        current = ch
+
+    if current:
+        units.append(current)
+
+    return units
+
+def sanitize_grapheme_unit(unit: str) -> str:
+    pieces = []
+    seen_marks = set()
+    has_base = False
+
+    for ch in unit or "":
+        category = unicodedata.category(ch)
+        is_mark = category.startswith("M")
+        is_joiner = ch in {"\u200c", "\u200d", "\ufe0f"}
+
+        if not is_mark and not is_joiner:
+            has_base = True
+            seen_marks.clear()
+            pieces.append(ch)
+            continue
+
+        if not has_base:
+            continue
+
+        if is_mark:
+            mark_key = (ch, category)
+            if mark_key in seen_marks:
+                continue
+            seen_marks.add(mark_key)
+
+        pieces.append(ch)
+
+    return "".join(pieces)
+
+def sanitize_visible_hindi_text(text: str) -> str:
+    return "".join(
+        sanitize_grapheme_unit(unit)
+        for unit in split_grapheme_like_units(text or "")
+    )
+
+def visible_text_signature(text: str) -> str:
+    cleaned = sanitize_visible_hindi_text(text or "")
+    cleaned = normalize_quote_style(cleaned)
+    cleaned = cleaned.replace("\u200c", "").replace("\u200d", "").replace("\ufe0f", "")
+    cleaned = re.sub(r"\s+", " ", cleaned.strip())
+    return cleaned
+
 def word_tokens_hi(text: str):
-    return re.findall(r"[A-Za-z0-9\u0900-\u097F]+", text or "")
+    tokens = []
+    current = []
+
+    for unit in split_grapheme_like_units(text or ""):
+        if classify_diff_unit(unit) == "word":
+            sanitized = sanitize_grapheme_unit(unit)
+            if sanitized:
+                current.append(sanitized)
+            continue
+
+        if current:
+            tokens.append("".join(current))
+            current = []
+
+    if current:
+        tokens.append("".join(current))
+
+    return tokens
 
 def changed_word_token_count(original: str, corrected: str) -> int:
     original_tokens = [normalise_hi(token) for token in word_tokens_hi(original)]
@@ -2757,6 +2846,32 @@ def looks_like_sentence_level_spelling_change(original: str, corrected: str) -> 
     changed = changed_word_token_count(original, corrected)
     return 1 <= changed <= 2
 
+def is_likely_grammar_form_change(original: str, corrected: str) -> bool:
+    original_tokens = [normalise_hi(token) for token in word_tokens_hi(original)]
+    corrected_tokens = [normalise_hi(token) for token in word_tokens_hi(corrected)]
+    if len(original_tokens) != len(corrected_tokens) or not original_tokens:
+        return False
+
+    changed_pairs = [
+        (o, c)
+        for o, c in zip(original_tokens, corrected_tokens)
+        if o != c
+    ]
+    if len(changed_pairs) != 1:
+        return False
+
+    grammar_forms = {
+        "है", "हैं", "था", "थे", "थी",
+        "होगा", "होंगे", "होगी",
+        "गया", "गई", "गए",
+        "किया", "की", "किए",
+        "लिया", "ली", "लिए",
+        "रहा", "रही", "रहे",
+        "हुआ", "हुई", "हुए",
+    }
+    original_token, corrected_token = changed_pairs[0]
+    return original_token in grammar_forms and corrected_token in grammar_forms
+
 def is_spelling_reason(reason: str) -> bool:
     lower = (reason or "").strip().lower()
     return any(marker in lower for marker in (
@@ -2777,6 +2892,10 @@ def is_spelling_reason(reason: str) -> bool:
     ))
 
 def classify_language_issue(original, corrected, reason):
+    if visible_text_signature(original) == visible_text_signature(corrected):
+        return "grammar"
+    if is_likely_grammar_form_change(original, corrected):
+        return "grammar"
     if is_spelling_reason(reason):
         return "spelling"
     if is_hindi_spelling_issue(original, corrected):
@@ -2784,31 +2903,6 @@ def classify_language_issue(original, corrected, reason):
     if looks_like_sentence_level_spelling_change(original, corrected):
         return "spelling"
     return "grammar"
-
-def split_grapheme_like_units(text: str):
-    units = []
-    current = ""
-
-    for ch in text or "":
-        if not current:
-            current = ch
-            continue
-
-        if (
-            unicodedata.combining(ch)
-            or ch in {"\u200c", "\u200d", "\ufe0f", "\u094d"}
-            or current.endswith(("\u094d", "\u200c", "\u200d"))
-        ):
-            current += ch
-            continue
-
-        units.append(current)
-        current = ch
-
-    if current:
-        units.append(current)
-
-    return units
 
 def classify_diff_unit(unit: str) -> str:
     if not unit:
@@ -2852,6 +2946,8 @@ def tokenize_for_diff(text: str):
     return tokens
 
 def highlight_diff_pair(original: str, corrected: str):
+    original = sanitize_visible_hindi_text(original or "")
+    corrected = sanitize_visible_hindi_text(corrected or "")
     original_tokens = tokenize_for_diff(original or "")
     corrected_tokens = tokenize_for_diff(corrected or "")
 
@@ -2932,6 +3028,7 @@ def render_language_table(rows):
     if not rows:
         return ""
 
+    body_rows = []
     lines = [
         """
 <style>
@@ -2968,8 +3065,10 @@ def render_language_table(rows):
     ]
 
     for original, corrected, reason in rows:
+        if is_visually_identical_correction(original, corrected):
+            continue
         original_html, corrected_html = highlight_diff_pair(original, corrected)
-        lines.append(
+        body_rows.append(
             "<tr>"
             f"<td>{original_html}</td>"
             f"<td>{corrected_html}</td>"
@@ -2977,6 +3076,10 @@ def render_language_table(rows):
             "</tr>"
         )
 
+    if not body_rows:
+        return ""
+
+    lines.extend(body_rows)
     lines.append("</tbody></table>")
     return "\n".join(lines)
 
