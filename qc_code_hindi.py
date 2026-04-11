@@ -1152,7 +1152,7 @@ RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-PROMPT_VERSION_HI = "2026-04-11-5"
+PROMPT_VERSION_HI = "2026-04-11-6"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -3927,6 +3927,20 @@ def is_material_fact_candidate(sentence: str) -> bool:
         return True
     return False
 
+def is_material_date_claim(sentence: str) -> bool:
+    sent = (sentence or "").strip().lower()
+    if len(sent) < 20:
+        return False
+    if not re.search(r"\d", sent):
+        return False
+    date_markers = (
+        "जनवरी", "फरवरी", "मार्च", "अप्रैल", "मई", "जून", "जुलाई", "अगस्त",
+        "सितंबर", "अक्टूबर", "नवंबर", "दिसंबर",
+        "तिथि", "तृतीया", "पंचांग", "मुहूर्त", "शुरुआत", "आरंभ", "यात्रा",
+        "अक्षय", "उद्घाटन", "खुलेंगे", "कब", "पड़ेगी", "पड़ रही", "समापन",
+    )
+    return any(marker in sent for marker in date_markers)
+
 def is_package_schedule_context(text: str) -> bool:
     lower = (text or "").strip().lower()
     if not lower:
@@ -3986,7 +4000,11 @@ def should_keep_lead_fact_sentence(sentence: str) -> bool:
         return False
     if is_dynamic_schedule_or_pricing_sentence(sent):
         return False
-    return is_hindi_fact_sentence(sent) or is_material_fact_candidate(sent)
+    return (
+        is_material_date_claim(sent)
+        or is_hindi_fact_sentence(sent)
+        or is_material_fact_candidate(sent)
+    )
 
 def extract_fact_statements(article_data):
     statements = []
@@ -4045,7 +4063,7 @@ def extract_fact_statements(article_data):
             continue
 
         for sent in split_hindi_sentences(text):
-            if not is_hindi_fact_sentence(sent):
+            if not (is_hindi_fact_sentence(sent) or is_material_date_claim(sent)):
                 continue
             if is_fact_process_sentence(sent) or is_low_value_fact_sentence(sent):
                 continue
@@ -4156,6 +4174,9 @@ Rules:
 - Do not flag style, wording, naming preference, branding simplification, abbreviation expansion, punctuation, or grammar as factual issues.
 - Omit dynamic commercial or schedule rows (package fares, booking prices, departure schedules, "upcoming date", product/package fees) unless an authoritative source clearly contradicts the same package and the same effective date.
 - Never infer a contradiction from recurring schedule metadata alone when the article cites a specific dated departure.
+- Material date claims are important. Verify and flag contradictions for festival dates, tithi dates, yatra start dates, opening dates, event dates, and deadline/date statements when authoritative sources disagree.
+- Do not omit a statement merely because it contains a month or date. Only treat it as a dynamic schedule row when it is clearly about a commercial package/tour/booking schedule or pricing.
+- For religious calendar or tithi claims, prefer authoritative panchang/temple/official calendar sources when available.
 - Use "Needs verification (current)" only as a last resort for a materially important current-affairs claim whose present status cannot be verified reliably.
 - If grounded search is merely sparse, mixed, or not clearly authoritative for a minor claim, omit the row instead of emitting "Needs verification (current)".
 - If you do use "Needs verification (current)", the Correct Fact must be exactly: "Could not verify reliably as of {today_iso}."
