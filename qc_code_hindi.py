@@ -1152,7 +1152,7 @@ RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-PROMPT_VERSION_HI = "2026-04-11-4"
+PROMPT_VERSION_HI = "2026-04-11-5"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
@@ -2414,10 +2414,9 @@ def is_generic_verification_fact(issue: str, correction: str, today_iso: str) ->
 
 def is_dynamic_schedule_or_pricing_fact(statement: str, issue: str, correction: str) -> bool:
     combined = " ".join(filter(None, [statement, issue, correction])).lower()
+    if not is_package_schedule_context(combined):
+        return False
     dynamic_markers = (
-        "पैकेज",
-        "package",
-        "tour package",
         "package fee",
         "package fare",
         "प्रति व्यक्ति",
@@ -3928,39 +3927,56 @@ def is_material_fact_candidate(sentence: str) -> bool:
         return True
     return False
 
-def is_dynamic_schedule_or_pricing_sentence(sentence: str) -> bool:
-    lower = (sentence or "").strip().lower()
+def is_package_schedule_context(text: str) -> bool:
+    lower = (text or "").strip().lower()
     if not lower:
         return False
-    dynamic_markers = (
+    package_markers = (
         "पैकेज",
         "package",
         "टूर",
         "tour",
-        "बुकिंग",
         "booking",
-        "departure",
+        "बुकिंग",
+        "irctc",
         "journey",
+        "departure",
+        "departs",
         "upcoming date",
+        "traveling together",
+        "single occupancy",
+        "child with a bed",
+        "3ac",
+        "sl berths",
+    )
+    return any(marker in lower for marker in package_markers)
+
+def is_dynamic_schedule_or_pricing_sentence(sentence: str) -> bool:
+    lower = (sentence or "").strip().lower()
+    if not lower:
+        return False
+    if not is_package_schedule_context(lower):
+        return False
+    dynamic_markers = (
         "प्रति व्यक्ति",
         "कीमत",
         "price",
         "fare",
         "fees",
         "फीस",
-        "शनिवार",
-        "अप्रैल",
         "रुपये",
         "₹",
-        "3ac",
-        "sl berths",
+        "शुरुआत",
+        "depart",
+        "upcoming",
+        "तारीख",
+        "date",
+        "every saturday",
+        "every sunday",
+        "हर शनिवार",
+        "हर रविवार",
     )
-    return any(marker in lower for marker in dynamic_markers) and (
-        bool(re.search(r"\d", lower))
-        or "शुरुआत" in lower
-        or "depart" in lower
-        or "upcoming" in lower
-    )
+    return any(marker in lower for marker in dynamic_markers) and bool(re.search(r"\d", lower))
 
 def should_keep_lead_fact_sentence(sentence: str) -> bool:
     sent = (sentence or "").strip()
