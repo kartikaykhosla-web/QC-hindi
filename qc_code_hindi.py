@@ -2456,6 +2456,65 @@ def is_dynamic_schedule_or_pricing_fact(statement: str, issue: str, correction: 
         marker in combined for marker in issue_markers
     )
 
+def is_religious_calendar_claim(statement: str) -> bool:
+    lower = (statement or "").strip().lower()
+    if not lower:
+        return False
+    markers = (
+        "अक्षय तृतीया",
+        "akshaya tritiya",
+        "तृतीया",
+        "पंचांग",
+        "वैशाख",
+        "शुक्ल पक्ष",
+        "मुहूर्त",
+        "पर्व",
+        "चारधाम यात्रा",
+        "चार धाम यात्रा",
+        "कपाट",
+        "यात्रा की शुरुआत",
+    )
+    return any(marker in lower for marker in markers)
+
+def looks_like_exact_alternate_date(correction: str) -> bool:
+    lower = (correction or "").strip().lower()
+    if not lower:
+        return False
+    if re.search(r"\b(?:april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b", lower):
+        return True
+    if re.search(r"\b\d{1,2}\s+(?:april|may|june|july|august|september|october|november|december)\b", lower):
+        return True
+    if re.search(r"\b\d{1,2}\s*(?:अप्रैल|मई|जून|जुलाई|अगस्त|सितंबर|अक्टूबर|नवंबर|दिसंबर)\b", lower):
+        return True
+    if re.search(r"\b\d{1,2}:\d{2}\b", lower):
+        return True
+    return False
+
+def is_unstable_religious_date_fact(statement: str, issue: str, correction: str) -> bool:
+    issue_lower = (issue or "").strip().lower()
+    if not is_religious_calendar_claim(statement):
+        return False
+    if any(marker in issue_lower for marker in ("year", "this year", "published", "publication date")):
+        return False
+    if any(marker in issue_lower for marker in ("contradiction", "direct contradiction", "unsupported")) and looks_like_exact_alternate_date(correction):
+        return True
+    return False
+
+def rewrite_religious_year_context_fact(statement: str, issue: str, correction: str, article_data):
+    publication_date = get_article_publication_date(article_data)
+    if not publication_date:
+        return None
+
+    statement_lower = (statement or "").strip().lower()
+    if not any(marker in statement_lower for marker in ("इस साल", "इस वर्ष")):
+        return None
+
+    article_year = publication_date[:4]
+    return (
+        "वर्ष का संदर्भ स्पष्ट नहीं है; तिथि के साथ वर्ष भी लिखना चाहिए।",
+        f"यह संदर्भ {article_year} का है; तिथि के साथ {article_year} स्पष्ट रूप से लिखें।",
+    )
+
 def is_self_conflicting_fact_correction(statement: str, issue: str, correction: str) -> bool:
     correction_lower = (correction or "").strip().lower()
     if not correction_lower:
@@ -4243,6 +4302,11 @@ STATEMENTS:
                 continue
             if is_publication_date_conflict_fact(i, c, article_data):
                 continue
+            if is_unstable_religious_date_fact(s, i, c):
+                rewritten = rewrite_religious_year_context_fact(s, i, c, article_data)
+                if not rewritten:
+                    continue
+                i, c = rewritten
 
             c = normalize_fact_correction(i, c, today_iso)
             cluster_key = fact_issue_cluster_key(i, c, today_iso)
