@@ -2500,6 +2500,60 @@ def is_unstable_religious_date_fact(statement: str, issue: str, correction: str)
         return True
     return False
 
+def is_study_citation_claim(statement: str) -> bool:
+    lower = (statement or "").strip().lower()
+    if not lower:
+        return False
+    markers = (
+        "स्टडी",
+        "study",
+        "जर्नल",
+        "journal",
+        "research",
+        "शोध",
+        "के अनुसार",
+        "प्रकाशित",
+        "published",
+        "society",
+    )
+    return any(marker in lower for marker in markers)
+
+def lacks_specific_study_identity(statement: str) -> bool:
+    text = (statement or "").strip()
+    if not text:
+        return True
+    if re.search(r"\b(?:doi|pmid|issn)\b", text, flags=re.IGNORECASE):
+        return False
+    if re.search(r"[\"“”'].*?[\"“”']", text):
+        return False
+    if re.search(r"\b20\d{2}\b", text) and re.search(r"\b(?:study|journal|research|स्टडी|जर्नल|शोध)\b", text, flags=re.IGNORECASE):
+        return False
+    return True
+
+def is_unstable_study_fact(statement: str, issue: str, correction: str) -> bool:
+    issue_lower = (issue or "").strip().lower()
+    correction_lower = (correction or "").strip().lower()
+    if not is_study_citation_claim(statement):
+        return False
+    if not any(marker in issue_lower for marker in ("contradiction", "direct contradiction", "unsupported", "unverified", "factual contradiction")):
+        return False
+    unstable_markers = (
+        "did not publish",
+        "no study",
+        "no evidence",
+        "could not find",
+        "could not verify",
+        "not publish a study",
+        "journal did not publish",
+    )
+    return any(marker in correction_lower for marker in unstable_markers) and lacks_specific_study_identity(statement)
+
+def rewrite_study_citation_fact(statement: str):
+    return (
+        "अध्ययन/जर्नल संदर्भ की स्वतंत्र पुष्टि आवश्यक है।",
+        "लेख में स्टडी/जर्नल का सटीक शीर्षक, लेखक, वर्ष या DOI स्पष्ट नहीं है; स्रोत संदर्भ जोड़कर सत्यापित करें।",
+    )
+
 def rewrite_religious_year_context_fact(statement: str, issue: str, correction: str, article_data):
     publication_date = get_article_publication_date(article_data)
     if not publication_date:
@@ -4267,6 +4321,7 @@ Rules:
 - Material date claims are important. Verify and flag contradictions for festival dates, tithi dates, yatra start dates, opening dates, event dates, and deadline/date statements when authoritative sources disagree.
 - Do not omit a statement merely because it contains a month or date. Only treat it as a dynamic schedule row when it is clearly about a commercial package/tour/booking schedule or pricing.
 - For religious calendar or tithi claims, prefer authoritative panchang/temple/official calendar sources when available.
+- For medical, health, or journal-study claims, do not assert that a journal “did not publish” a study unless grounded sources identify the exact study or exact absence using the study title/authors/year/DOI or an authoritative journal/source record.
 - Use "Needs verification (current)" only as a last resort for a materially important current-affairs claim whose present status cannot be verified reliably.
 - If grounded search is merely sparse, mixed, or not clearly authoritative for a minor claim, omit the row instead of emitting "Needs verification (current)".
 - If you do use "Needs verification (current)", the Correct Fact must be exactly: "Could not verify reliably as of {today_iso}."
@@ -4338,6 +4393,8 @@ STATEMENTS:
                 if not rewritten:
                     continue
                 i, c = rewritten
+            if is_unstable_study_fact(s, i, c):
+                i, c = rewrite_study_citation_fact(s)
 
             c = normalize_fact_correction(i, c, today_iso)
             cluster_key = fact_issue_cluster_key(i, c, today_iso)
