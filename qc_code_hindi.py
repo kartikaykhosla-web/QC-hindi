@@ -2526,7 +2526,7 @@ def lacks_specific_study_identity(statement: str) -> bool:
         return False
     if re.search(r"[\"“”'].*?[\"“”']", text):
         return False
-    if re.search(r"\b20\d{2}\b", text) and re.search(r"\b(?:study|journal|research|स्टडी|जर्नल|शोध)\b", text, flags=re.IGNORECASE):
+    if re.search(r"\b(?:et al\\.?|vol\\.?|issue|no\\.?|pp\\.?|pages?)\b", text, flags=re.IGNORECASE):
         return False
     return True
 
@@ -2553,6 +2553,11 @@ def rewrite_study_citation_fact(statement: str):
         "अध्ययन/जर्नल संदर्भ की स्वतंत्र पुष्टि आवश्यक है।",
         "लेख में स्टडी/जर्नल का सटीक शीर्षक, लेखक, वर्ष या DOI स्पष्ट नहीं है; स्रोत संदर्भ जोड़कर सत्यापित करें।",
     )
+
+def is_empty_or_omitted_fact_issue(issue: str, correction: str) -> bool:
+    issue_norm = canon_hi(issue)
+    correction_norm = canon_hi(correction)
+    return issue_norm in {"", "none", "omitted"} or correction_norm in {"", "none", "omitted"}
 
 def rewrite_religious_year_context_fact(statement: str, issue: str, correction: str, article_data):
     publication_date = get_article_publication_date(article_data)
@@ -4375,6 +4380,8 @@ STATEMENTS:
             if all(re.fullmatch(r":?-{2,}:?", (x or "").strip()) for x in (s, i, c)):
                 continue
             if any(x.strip() in {"-", "--", "---"} for x in (s, i, c)):
+                continue
+            if is_empty_or_omitted_fact_issue(i, c):
                 continue
             if is_no_issue_fact(i, c):
                 continue
