@@ -2681,6 +2681,57 @@ def is_style_only_fact(statement: str, issue: str, correction: str) -> bool:
     )
     return any(marker in combined for marker in style_markers)
 
+def medical_concept_hits(text: str):
+    lower = (text or "").strip().lower()
+    concepts = set()
+    concept_map = {
+        "uric_acid": ("यूरिक एसिड", "uric acid"),
+        "kidney": ("किडनी", "गुर्द", "kidney", "renal"),
+        "diabetes": ("डायबिटीज", "मधुमेह", "diabetes"),
+        "heart": ("हार्ट", "हृदय", "दिल", "heart", "cardio"),
+        "hypertension": ("हाइपरटेंशन", "ब्लड प्रेशर", "hypertension", "blood pressure"),
+        "swelling": ("सूजन", "swelling", "edema"),
+        "joints": ("जोड़", "जोड़ों", "joint", "joints"),
+        "redness": ("लालिमा", "redness", "red"),
+        "warmth": ("गर्मी", "गरम", "warmth", "warm"),
+        "crystals": ("क्रिस्टल", "crystal", "needle-shaped"),
+        "disease": ("बीमारी", "बीमारियां", "समस्या", "problems", "disease", "diseases"),
+    }
+    for concept, markers in concept_map.items():
+        if any(marker in lower for marker in markers):
+            concepts.add(concept)
+    return concepts
+
+def is_supportive_health_fact(statement: str, issue: str, correction: str) -> bool:
+    issue_lower = (issue or "").strip().lower()
+    correction_lower = (correction or "").strip().lower()
+    if issue_lower not in {"false", "factual contradiction", "direct contradiction"}:
+        return False
+    if not correction_lower:
+        return False
+    negation_markers = (
+        "did not", "does not", "not ", "no ", "cannot", "can't", "unsupported",
+        "incorrect", "false because", "no evidence",
+    )
+    if any(marker in correction_lower for marker in negation_markers):
+        return False
+    supportive_markers = (
+        "can lead to", "can be a sign of", "can form", "is associated with",
+        "may", "helps", "support", "important for", "can cause",
+    )
+    if not any(marker in correction_lower for marker in supportive_markers):
+        return False
+    statement_concepts = medical_concept_hits(statement)
+    correction_concepts = medical_concept_hits(correction)
+    shared = statement_concepts & correction_concepts
+    if len(shared) >= 2:
+        return True
+    # Allow one shared concept when the statement is still clearly medical/symptom oriented.
+    health_markers_hi = ("यूरिक", "किडनी", "डायबिटीज", "हार्ट", "हाइपरटेंशन", "सूजन", "जोड़", "लालिमा", "गर्मी", "क्रिस्टल", "बीमारी")
+    if shared and any(marker in (statement or "") for marker in health_markers_hi):
+        return True
+    return False
+
 def find_context_snippet(article_data, needle: str) -> str:
     if not needle:
         return ""
@@ -4386,6 +4437,8 @@ STATEMENTS:
             if is_no_issue_fact(i, c):
                 continue
             if is_style_only_fact(s, i, c):
+                continue
+            if is_supportive_health_fact(s, i, c):
                 continue
             if is_generic_verification_fact(i, c, today_iso):
                 continue
