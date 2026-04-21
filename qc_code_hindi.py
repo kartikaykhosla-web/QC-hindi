@@ -1135,11 +1135,11 @@ def enforce_app_access(app_title: str, app_caption: str, app_name: str):
 
 if not IMPORT_ONLY:
     enforce_app_access(
-        "🧪 Hindi Article QC Tool (Gemini 2.5)",
+        "🧪 Hindi Article QC Tool",
         "Hindi Spelling · Grammar · Editorial Safety · AI Review",
         "hindi_qc",
     )
-    st.title("🧪 Hindi Article QC Tool (Gemini 2.5)")
+    st.title("🧪 Hindi Article QC Tool")
     st.caption("Hindi Spelling · Grammar · Editorial Safety · AI Review")
 
 # =================================================
@@ -1150,13 +1150,42 @@ REGION = "us-central1"
 CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
+MODEL_GEMINI_31 = "gemini-3.1-pro-preview"
+GEMINI_31_TEST_EMAILS = frozenset({
+    "santosh.pandey@jagrannewmedia.com",
+    "menka.singh@jagrannewmedia.com",
+    "shefali.pandey@jagrannewmedia.com",
+    "kartikay.khosla@jagrannewmedia.com",
+})
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-PROMPT_VERSION_HI = "2026-04-11-6"
+PROMPT_VERSION_HI = "2026-04-21-31-ab"
 PERSISTENT_CACHE_PATH_HI = os.path.join(
     os.path.dirname(__file__),
     ".hindi_ai_output_cache.json",
 )
+
+def selected_gemini_model(default_model=MODEL_FLASH):
+    email = _current_access_email()
+    if email in GEMINI_31_TEST_EMAILS:
+        return MODEL_GEMINI_31
+    return default_model or MODEL_FLASH
+
+def current_gemini_model_label(default_model=MODEL_FLASH):
+    model = selected_gemini_model(default_model)
+    if model == MODEL_GEMINI_31:
+        return "Gemini 3.1 Pro Preview (A/B)"
+    if model == MODEL_FLASH:
+        return "Gemini 2.5 Flash"
+    return model
+
+def render_active_model_indicator():
+    st.sidebar.markdown(f"**AI model:** `{current_gemini_model_label()}`")
+    if selected_gemini_model(MODEL_FLASH) == MODEL_GEMINI_31:
+        st.sidebar.caption("A/B test enabled for this login.")
+
+if not IMPORT_ONLY:
+    render_active_model_indicator()
 
 # =================================================
 # GCP AUTH
@@ -1234,10 +1263,10 @@ def build_generate_config(generation_config=None):
         thinkingConfig=genai_types.ThinkingConfig(thinkingBudget=0),
     )
 
-def generate_text(prompt, generation_config=None, model_name=MODEL_FLASH):
+def generate_text(prompt, generation_config=None, model_name=None):
     client = init_vertex_and_model()
     response = client.models.generate_content(
-        model=model_name,
+        model=model_name or selected_gemini_model(MODEL_FLASH),
         contents=prompt,
         config=build_generate_config(generation_config),
     )
@@ -3709,7 +3738,8 @@ def filter_editorial_rows(raw_table, article_text):
 # =================================================
 # GEMINI GRAMMAR QC (PARAGRAPH PASS)
 # =================================================
-def gemini_grammar_review(article_data, source_context=""):
+def gemini_grammar_review(article_data, source_context="", model_name=None):
+    selected_model = model_name or selected_gemini_model(MODEL_FLASH)
     raw_paragraphs = []
     for ctype, text in article_data:
         if ctype not in {"heading", "paragraph", "table"}:
@@ -3834,6 +3864,7 @@ TEXT:
                     "candidate_count": 1,
                     "max_output_tokens": 1400
                 },
+                model_name=selected_model,
             )
             responses.append(out)
         except Exception as exc:
@@ -3851,6 +3882,7 @@ TEXT:
                     "candidate_count": 1,
                     "max_output_tokens": 1600
                 },
+                model_name=selected_model,
             )
             responses.append(out)
         except Exception as exc:
@@ -3894,7 +3926,8 @@ TEXT:
 # =================================================
 # GEMINI EDITORIAL QC (HINDI GUIDELINES)
 # =================================================
-def gemini_editorial_review_hi(article_data, source_context=""):
+def gemini_editorial_review_hi(article_data, source_context="", model_name=None):
+    selected_model = model_name or selected_gemini_model(MODEL_FLASH)
     paragraphs = []
     for ctype, text in article_data:
         if ctype not in {"heading", "paragraph"}:
@@ -3999,6 +4032,7 @@ If there are no issues, return exactly one row:
                             "candidate_count": 1,
                             "max_output_tokens": 1400,
                         },
+                        model_name=selected_model,
                     )
                 )
             except Exception as exc:
@@ -4282,8 +4316,9 @@ def article_hash(article_data):
     joined = "\n".join(t for _, t in article_data)
     return hashlib.md5(joined.encode("utf-8")).hexdigest()
 
-def analysis_snapshot_key(article_data, source_context=""):
-    return f"{PROMPT_VERSION_HI}:{get_domain(source_context)}:{article_hash(article_data)}"
+def analysis_snapshot_key(article_data, source_context="", model_name=None):
+    model_key = model_name or selected_gemini_model(MODEL_FLASH)
+    return f"{PROMPT_VERSION_HI}:{model_key}:{get_domain(source_context)}:{article_hash(article_data)}"
 
 def load_persistent_analysis_cache():
     try:
@@ -4302,16 +4337,16 @@ def save_persistent_analysis_cache(cache):
     except Exception:
         pass
 
-def load_analysis_snapshot(article_data, source_context=""):
+def load_analysis_snapshot(article_data, source_context="", model_name=None):
     cache = load_persistent_analysis_cache()
-    snapshot = cache.get(analysis_snapshot_key(article_data, source_context))
+    snapshot = cache.get(analysis_snapshot_key(article_data, source_context, model_name))
     return snapshot if snapshot_has_meaningful_output(snapshot) else None
 
-def save_analysis_snapshot(article_data, snapshot, source_context=""):
+def save_analysis_snapshot(article_data, snapshot, source_context="", model_name=None):
     if not snapshot_has_meaningful_output(snapshot):
         return
     cache = load_persistent_analysis_cache()
-    cache[analysis_snapshot_key(article_data, source_context)] = snapshot
+    cache[analysis_snapshot_key(article_data, source_context, model_name)] = snapshot
     save_persistent_analysis_cache(cache)
 
 def clear_persistent_analysis_cache():
@@ -4327,8 +4362,9 @@ def chunked(lst, size):
     for i in range(0, len(lst), size):
         yield lst[i:i + size]
 
-def gemini_fact_check(article_data):
-    key = article_hash(article_data)
+def gemini_fact_check(article_data, model_name=None):
+    selected_model = model_name or selected_gemini_model(MODEL_FLASH)
+    key = f"{selected_model}:{article_hash(article_data)}"
     if key in FACT_CACHE:
         return FACT_CACHE[key]
 
@@ -4400,7 +4436,7 @@ STATEMENTS:
 
         try:
             response = client.models.generate_content(
-                model=MODEL_FLASH,
+                model=selected_model,
                 contents=PROMPT,
                 config=genai_types.GenerateContentConfig(
                     temperature=0,
@@ -4501,16 +4537,16 @@ STATEMENTS:
     return result
 
 @st.cache_data(show_spinner=False)
-def cached_gemini_grammar_review(article_data, source_context=""):
-    return gemini_grammar_review(article_data, source_context)
+def cached_gemini_grammar_review(article_data, source_context="", model_name=None):
+    return gemini_grammar_review(article_data, source_context, model_name)
 
 @st.cache_data(show_spinner=False)
-def cached_gemini_editorial_review_hi(article_data, source_context=""):
-    return gemini_editorial_review_hi(article_data, source_context)
+def cached_gemini_editorial_review_hi(article_data, source_context="", model_name=None):
+    return gemini_editorial_review_hi(article_data, source_context, model_name)
 
 @st.cache_data(show_spinner=False)
-def cached_gemini_fact_check(article_data):
-    return gemini_fact_check(article_data)
+def cached_gemini_fact_check(article_data, model_name=None):
+    return gemini_fact_check(article_data, model_name)
 
 # =================================================
 # PIPELINE
@@ -4605,15 +4641,16 @@ if not IMPORT_ONLY:
             t for c, t in article_content if c in {"heading", "paragraph", "table"}
         )
 
-        snapshot = load_analysis_snapshot(qc_content, source_context)
+        active_model = selected_gemini_model(MODEL_FLASH)
+        snapshot = load_analysis_snapshot(qc_content, source_context, active_model)
         if snapshot:
             raw = snapshot.get("grammar_raw", "")
             editorial_raw = snapshot.get("editorial_raw", "")
             fact_result = snapshot.get("fact_result", "")
         else:
-            raw = cached_gemini_grammar_review(qc_content, source_context)
-            editorial_raw = cached_gemini_editorial_review_hi(qc_content, source_context)
-            fact_result = cached_gemini_fact_check(qc_content)
+            raw = cached_gemini_grammar_review(qc_content, source_context, active_model)
+            editorial_raw = cached_gemini_editorial_review_hi(qc_content, source_context, active_model)
+            fact_result = cached_gemini_fact_check(qc_content, active_model)
             save_analysis_snapshot(
                 qc_content,
                 {
@@ -4622,6 +4659,7 @@ if not IMPORT_ONLY:
                     "fact_result": fact_result,
                 },
                 source_context,
+                active_model,
             )
 
         clean = filter_gemini_rows(raw, article_text)
