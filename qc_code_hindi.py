@@ -1147,6 +1147,7 @@ if not IMPORT_ONLY:
 # =================================================
 PROJECT_ID = str(_secret("VERTEX_PROJECT_ID", "")).strip()
 REGION = "us-central1"
+GEMINI_31_REGION = "global"
 CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
@@ -1171,6 +1172,11 @@ def selected_gemini_model(default_model=MODEL_FLASH):
         return MODEL_GEMINI_31
     return default_model or MODEL_FLASH
 
+def gemini_model_region(model_name: str) -> str:
+    if (model_name or "").startswith("gemini-3"):
+        return GEMINI_31_REGION
+    return REGION
+
 def current_gemini_model_label(default_model=MODEL_FLASH):
     model = selected_gemini_model(default_model)
     if model == MODEL_GEMINI_31:
@@ -1180,8 +1186,12 @@ def current_gemini_model_label(default_model=MODEL_FLASH):
     return model
 
 def render_active_model_indicator():
-    st.sidebar.markdown(f"**AI model:** `{current_gemini_model_label()}`")
-    if selected_gemini_model(MODEL_FLASH) == MODEL_GEMINI_31:
+    active_model = selected_gemini_model(MODEL_FLASH)
+    st.sidebar.markdown(
+        f"**AI model:** `{current_gemini_model_label()}`  \n"
+        f"**Vertex location:** `{gemini_model_region(active_model)}`"
+    )
+    if active_model == MODEL_GEMINI_31:
         st.sidebar.caption("A/B test enabled for this login.")
 
 if not IMPORT_ONLY:
@@ -1224,13 +1234,13 @@ ARTICLE_PUBLISHED_META_PREFIX = "__PUBLISHED_DATE__:"
 # MODEL INIT (PARALLEL TO ENGLISH)
 # =================================================
 @st.cache_resource
-def init_vertex_and_model():
+def init_vertex_and_model(location=REGION):
     creds, project_id = load_gcp_credentials()
 
     client = genai.Client(
         vertexai=True,
         project=project_id,
-        location=REGION,
+        location=location,
         credentials=creds,
     )
 
@@ -1250,25 +1260,28 @@ def init_vertex_and_model():
 
     return client
 
-def build_generate_config(generation_config=None):
+def build_generate_config(generation_config=None, model_name=None):
     cfg = generation_config or {}
-    return genai_types.GenerateContentConfig(
-        temperature=cfg.get("temperature"),
-        topP=cfg.get("top_p", 0),
-        topK=cfg.get("top_k"),
-        candidateCount=cfg.get("candidate_count"),
-        maxOutputTokens=cfg.get("max_output_tokens"),
-        seed=0,
-        responseMimeType="text/plain",
-        thinkingConfig=genai_types.ThinkingConfig(thinkingBudget=0),
-    )
+    config = {
+        "temperature": cfg.get("temperature"),
+        "topP": cfg.get("top_p", 0),
+        "topK": cfg.get("top_k"),
+        "candidateCount": cfg.get("candidate_count"),
+        "maxOutputTokens": cfg.get("max_output_tokens"),
+        "seed": 0,
+        "responseMimeType": "text/plain",
+    }
+    if not (model_name or "").startswith("gemini-3"):
+        config["thinkingConfig"] = genai_types.ThinkingConfig(thinkingBudget=0)
+    return genai_types.GenerateContentConfig(**config)
 
 def generate_text(prompt, generation_config=None, model_name=None):
-    client = init_vertex_and_model()
+    selected_model = model_name or selected_gemini_model(MODEL_FLASH)
+    client = init_vertex_and_model(gemini_model_region(selected_model))
     response = client.models.generate_content(
-        model=model_name or selected_gemini_model(MODEL_FLASH),
+        model=selected_model,
         contents=prompt,
-        config=build_generate_config(generation_config),
+        config=build_generate_config(generation_config, selected_model),
     )
     return response.text or ""
 
@@ -4388,7 +4401,7 @@ def gemini_fact_check(article_data, model_name=None):
     had_success = False
     last_error = None
     today_iso = datetime.now(timezone.utc).date().isoformat()
-    client = init_vertex_and_model()
+    client = init_vertex_and_model(gemini_model_region(selected_model))
 
     for batch in chunked(statements, 5):
         block = "\n".join(f"- {s}" for s in batch)
@@ -4435,20 +4448,22 @@ STATEMENTS:
 """
 
         try:
+            fact_config = {
+                "temperature": 0,
+                "topP": 1,
+                "topK": 1,
+                "candidateCount": 1,
+                "maxOutputTokens": 768,
+                "seed": 0,
+                "responseMimeType": "text/plain",
+                "tools": [genai_types.Tool(google_search=genai_types.GoogleSearch())],
+            }
+            if not selected_model.startswith("gemini-3"):
+                fact_config["thinkingConfig"] = genai_types.ThinkingConfig(thinkingBudget=0)
             response = client.models.generate_content(
                 model=selected_model,
                 contents=PROMPT,
-                config=genai_types.GenerateContentConfig(
-                    temperature=0,
-                    topP=1,
-                    topK=1,
-                    candidateCount=1,
-                    maxOutputTokens=768,
-                    seed=0,
-                    responseMimeType="text/plain",
-                    thinkingConfig=genai_types.ThinkingConfig(thinkingBudget=0),
-                    tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
-                ),
+                config=genai_types.GenerateContentConfig(**fact_config),
             )
             out = response.text or ""
             had_success = True
