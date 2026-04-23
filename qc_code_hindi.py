@@ -1150,6 +1150,13 @@ REGION = "us-central1"
 CRED_PATH = "/tmp/gcp_service_account.json"
 RULES_PATH = os.path.join(os.path.dirname(__file__), "hindi_qc_rules.txt")
 MODEL_FLASH = "gemini-2.5-flash"
+MODEL_PRO = "gemini-2.5-pro"
+FACTCHECK_PRO_TEST_EMAILS = frozenset({
+    "santosh.pandey@jagrannewmedia.com",
+    "menka.singh@jagrannewmedia.com",
+    "shefali.pandey@jagrannewmedia.com",
+    "kartikay.khosla@jagrannewmedia.com",
+})
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 PROMPT_VERSION_HI = "2026-04-11-6"
@@ -1188,6 +1195,12 @@ def load_hindi_rule_pairs():
             continue
         pairs.append((wrong, correct))
     return pairs
+
+def factcheck_model_for_current_user(default_model=MODEL_FLASH):
+    email = _current_access_email()
+    if email in FACTCHECK_PRO_TEST_EMAILS:
+        return MODEL_PRO
+    return default_model
 
 ARTICLE_PUBLISHED_META_PREFIX = "__PUBLISHED_DATE__:"
 
@@ -4282,8 +4295,8 @@ def article_hash(article_data):
     joined = "\n".join(t for _, t in article_data)
     return hashlib.md5(joined.encode("utf-8")).hexdigest()
 
-def analysis_snapshot_key(article_data, source_context=""):
-    return f"{PROMPT_VERSION_HI}:{get_domain(source_context)}:{article_hash(article_data)}"
+def analysis_snapshot_key(article_data, source_context="", fact_model=MODEL_FLASH):
+    return f"{PROMPT_VERSION_HI}:{fact_model}:{get_domain(source_context)}:{article_hash(article_data)}"
 
 def load_persistent_analysis_cache():
     try:
@@ -4302,16 +4315,16 @@ def save_persistent_analysis_cache(cache):
     except Exception:
         pass
 
-def load_analysis_snapshot(article_data, source_context=""):
+def load_analysis_snapshot(article_data, source_context="", fact_model=MODEL_FLASH):
     cache = load_persistent_analysis_cache()
-    snapshot = cache.get(analysis_snapshot_key(article_data, source_context))
+    snapshot = cache.get(analysis_snapshot_key(article_data, source_context, fact_model))
     return snapshot if snapshot_has_meaningful_output(snapshot) else None
 
-def save_analysis_snapshot(article_data, snapshot, source_context=""):
+def save_analysis_snapshot(article_data, snapshot, source_context="", fact_model=MODEL_FLASH):
     if not snapshot_has_meaningful_output(snapshot):
         return
     cache = load_persistent_analysis_cache()
-    cache[analysis_snapshot_key(article_data, source_context)] = snapshot
+    cache[analysis_snapshot_key(article_data, source_context, fact_model)] = snapshot
     save_persistent_analysis_cache(cache)
 
 def clear_persistent_analysis_cache():
@@ -4327,8 +4340,8 @@ def chunked(lst, size):
     for i in range(0, len(lst), size):
         yield lst[i:i + size]
 
-def gemini_fact_check(article_data):
-    key = article_hash(article_data)
+def gemini_fact_check(article_data, model_name=MODEL_FLASH):
+    key = f"{model_name}:{article_hash(article_data)}"
     if key in FACT_CACHE:
         return FACT_CACHE[key]
 
@@ -4400,7 +4413,7 @@ STATEMENTS:
 
         try:
             response = client.models.generate_content(
-                model=MODEL_FLASH,
+                model=model_name,
                 contents=PROMPT,
                 config=genai_types.GenerateContentConfig(
                     temperature=0,
@@ -4509,8 +4522,8 @@ def cached_gemini_editorial_review_hi(article_data, source_context=""):
     return gemini_editorial_review_hi(article_data, source_context)
 
 @st.cache_data(show_spinner=False)
-def cached_gemini_fact_check(article_data):
-    return gemini_fact_check(article_data)
+def cached_gemini_fact_check(article_data, model_name=MODEL_FLASH):
+    return gemini_fact_check(article_data, model_name)
 
 # =================================================
 # PIPELINE
@@ -4605,7 +4618,8 @@ if not IMPORT_ONLY:
             t for c, t in article_content if c in {"heading", "paragraph", "table"}
         )
 
-        snapshot = load_analysis_snapshot(qc_content, source_context)
+        fact_model = factcheck_model_for_current_user(MODEL_FLASH)
+        snapshot = load_analysis_snapshot(qc_content, source_context, fact_model)
         if snapshot:
             raw = snapshot.get("grammar_raw", "")
             editorial_raw = snapshot.get("editorial_raw", "")
@@ -4613,7 +4627,7 @@ if not IMPORT_ONLY:
         else:
             raw = cached_gemini_grammar_review(qc_content, source_context)
             editorial_raw = cached_gemini_editorial_review_hi(qc_content, source_context)
-            fact_result = cached_gemini_fact_check(qc_content)
+            fact_result = cached_gemini_fact_check(qc_content, fact_model)
             save_analysis_snapshot(
                 qc_content,
                 {
@@ -4622,6 +4636,7 @@ if not IMPORT_ONLY:
                     "fact_result": fact_result,
                 },
                 source_context,
+                fact_model,
             )
 
         clean = filter_gemini_rows(raw, article_text)
