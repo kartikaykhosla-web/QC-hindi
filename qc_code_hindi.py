@@ -1336,6 +1336,24 @@ DOMAIN_ARTICLE_SELECTORS = {
         ".repeated_article_area",
         "article",
     ],
+    "jagranjosh.com": [
+        "[itemprop='articleBody']",
+        "article",
+        ".article-content",
+        ".story-content",
+        ".entry-content",
+        ".detail-content",
+        ".content-text",
+    ],
+    "www.jagranjosh.com": [
+        "[itemprop='articleBody']",
+        "article",
+        ".article-content",
+        ".story-content",
+        ".entry-content",
+        ".detail-content",
+        ".content-text",
+    ],
 }
 
 EXCLUDED_SUBTREE_SELECTORS = [
@@ -1376,6 +1394,16 @@ EXCLUDED_SUBTREE_SELECTORS = [
     ".footer",
     ".ad",
     ".ads",
+    ".comments",
+    ".comment",
+    "[id*='comment']",
+    "[class*='comment']",
+    "[class*='Comment']",
+    "[id*='related']",
+    "[class*='related']",
+    "[class*='recommend']",
+    "[class*='trending']",
+    "[class*='newsletter']",
 ]
 
 def is_navigation_blob(text: str) -> bool:
@@ -1425,6 +1453,16 @@ def should_skip_extracted_text(text: str) -> bool:
     if lower.startswith("...और पढ़ें") or lower.startswith("और पढ़ें"):
         return True
     if lower.startswith("जानिए मुख्य बातें") or "खबर का सार एक नजर में" in lower:
+        return True
+    if lower.startswith("also read") or lower.startswith("also, check"):
+        return True
+    if lower.startswith("check out"):
+        return True
+    if lower.startswith("source:"):
+        return True
+    if "leave a comment" in lower or "post a comment" in lower:
+        return True
+    if "click here" in lower:
         return True
     if is_navigation_blob(compact):
         return True
@@ -1511,6 +1549,9 @@ def is_jagran_domain(url: str) -> bool:
 
 def is_vishvasnews_domain(url: str) -> bool:
     return get_domain(url) in {"vishvasnews.com", "www.vishvasnews.com"}
+
+def is_jagranjosh_domain(url: str) -> bool:
+    return get_domain(url) in {"jagranjosh.com", "www.jagranjosh.com"}
 
 def has_inline_read_more(raw_text: str) -> bool:
     compact = re.sub(r"\s+", " ", (raw_text or "").strip())
@@ -1896,6 +1937,96 @@ def extract_from_json_article_body(soup, content, seen):
             seen.add(para)
             content.append(("heading" if is_heading_like_hi(para) else "paragraph", para))
 
+def extract_from_jagranjosh_next_data(soup, content, seen):
+    script = soup.find("script", {"id": "__NEXT_DATA__", "type": "application/json"})
+    if not script:
+        return
+
+    raw = script.string or script.get_text() or ""
+    if not raw:
+        return
+
+    try:
+        next_data = json.loads(raw)
+    except Exception:
+        return
+
+    page_props = ((next_data or {}).get("props") or {}).get("pageProps") or {}
+    fragments = []
+
+    def push_fragment(value):
+        if isinstance(value, str) and len(value.strip()) >= 40:
+            fragments.append(value)
+
+    def push_fragment_list(values):
+        if isinstance(values, list):
+            for item in values:
+                if isinstance(item, str):
+                    push_fragment(item)
+
+    story_data = (page_props.get("StoryData") or {}).get("data")
+    if isinstance(story_data, dict):
+        push_fragment_list(story_data.get("body_chunks"))
+        for key in ("body2", "body", "schema_article_body"):
+            push_fragment(story_data.get(key))
+
+    exam_data = (page_props.get("ExamDetail") or {}).get("data")
+    if isinstance(exam_data, list):
+        for item in exam_data[:2]:
+            if not isinstance(item, dict):
+                continue
+            for key in ("EXAM_DESCRIPTION", "SUMMARY", "SCHEMA_DESCRIPTION"):
+                push_fragment(item.get(key))
+    elif isinstance(exam_data, dict):
+        for key in ("EXAM_DESCRIPTION", "SUMMARY", "SCHEMA_DESCRIPTION"):
+            push_fragment(exam_data.get(key))
+
+    college_results = (page_props.get("CollegeDetail") or {}).get("results")
+    if isinstance(college_results, list):
+        for item in college_results[:1]:
+            if not isinstance(item, dict):
+                continue
+            for key in (
+                "DESCRIPTION",
+                "PLACEMENT",
+                "ADMISSION_PROCESS",
+                "CUTOFF_DETAIL",
+                "ELIGIBILITY_CRITERIA",
+            ):
+                push_fragment(item.get(key))
+
+    for key in ("CollegeCourses", "courseList"):
+        extras = (page_props.get(key) or {}).get("extras")
+        if isinstance(extras, dict):
+            push_fragment(extras.get("COURSE_DETAIL"))
+
+    for fragment in fragments:
+        low = fragment.lower()
+        if (
+            "cnt_j0qnre" in low
+            and "container-wrapper one_column" in low
+            and "<h" not in low
+            and "<table" not in low
+            and "<ul" not in low
+        ):
+            continue
+
+        if "<" in fragment and ">" in fragment:
+            extend_content_from_container(BeautifulSoup(fragment, "html.parser"), content, seen)
+            continue
+
+        for para in re.split(r"\n+|\\n+", fragment):
+            para = sanitize_extracted_text(para)
+            min_len = 8 if is_heading_like_hi(para) else 20
+            if len(para) < min_len:
+                continue
+            append_unique_content(
+                content,
+                seen,
+                "heading" if is_heading_like_hi(para) else "paragraph",
+                para,
+            )
+
 # =================================================
 # INPUT EXTRACTION (UNCHANGED STRUCTURE)
 # =================================================
@@ -1962,6 +2093,12 @@ def clean_article(url):
         extract_from_vishvasnews(soup, content, seen)
         if is_sufficient_article_body(content):
             return content
+
+    if is_jagranjosh_domain(url):
+        extract_from_jagranjosh_next_data(soup, content, seen)
+        if not any(ctype == "paragraph" for ctype, _ in content):
+            extract_from_article_roots(soup, url, content, seen)
+        return content
 
     if is_jagran_domain(url):
         extract_from_json_article_body(soup, content, seen)
