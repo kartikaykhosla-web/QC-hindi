@@ -2492,6 +2492,25 @@ def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str
     context = f"{original} {corrected} {reason}".lower()
     return not any(marker in context for marker in beverage_markers)
 
+DEVANAGARI_DIGIT_TRANSLATION = str.maketrans("०१२३४५६७८९", "0123456789")
+
+def normalize_digit_text(text: str) -> str:
+    return (text or "").translate(DEVANAGARI_DIGIT_TRANSLATION)
+
+def extract_year_tokens(text: str):
+    return re.findall(r"\b20\d{2}\b", normalize_digit_text(text))
+
+def is_year_drift_correction(original: str, corrected: str, reason: str) -> bool:
+    original_years = extract_year_tokens(original)
+    corrected_years = extract_year_tokens(corrected)
+    if not original_years or not corrected_years:
+        return False
+    if original_years == corrected_years:
+        return False
+
+    # A year swap is factual drift, not a spelling/grammar fix.
+    return True
+
 def should_skip_language_change(original: str, corrected: str, reason: str) -> bool:
     return any((
         is_noop_reason(reason),
@@ -2506,6 +2525,7 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
         is_redundant_gender_rewrite(original, corrected, reason),
         is_token_equivalent_correction(original, corrected, reason),
         is_ambiguous_homophone_correction(original, corrected, reason),
+        is_year_drift_correction(original, corrected, reason),
     ))
 
 def should_project_editorial_to_language(issue: str) -> bool:
