@@ -2531,6 +2531,19 @@ def is_script_translation_correction(original: str, corrected: str, reason: str)
     )
     return any(marker in reason_lower for marker in english_markers)
 
+def is_placeholder_language_row(original: str, corrected: str, reason: str) -> bool:
+    cells = [str(original or "").strip(), str(corrected or "").strip(), str(reason or "").strip()]
+    if not any(cells):
+        return True
+    return all(cell in {"-", "--", "---"} for cell in cells)
+
+def is_invalid_hindi_language_row(original: str, corrected: str, reason: str) -> bool:
+    return any((
+        is_placeholder_language_row(original, corrected, reason),
+        is_script_translation_correction(original, corrected, reason),
+        is_year_drift_correction(original, corrected, reason),
+    ))
+
 def is_year_drift_correction(original: str, corrected: str, reason: str) -> bool:
     original_years = extract_year_tokens(original)
     corrected_years = extract_year_tokens(corrected)
@@ -2544,6 +2557,7 @@ def is_year_drift_correction(original: str, corrected: str, reason: str) -> bool
 
 def should_skip_language_change(original: str, corrected: str, reason: str) -> bool:
     return any((
+        is_invalid_hindi_language_row(original, corrected, reason),
         is_noop_reason(reason),
         is_noop_correction(original, corrected),
         is_visually_identical_correction(original, corrected),
@@ -2556,8 +2570,6 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
         is_redundant_gender_rewrite(original, corrected, reason),
         is_token_equivalent_correction(original, corrected, reason),
         is_ambiguous_homophone_correction(original, corrected, reason),
-        is_script_translation_correction(original, corrected, reason),
-        is_year_drift_correction(original, corrected, reason),
     ))
 
 def should_project_editorial_to_language(issue: str) -> bool:
@@ -3416,6 +3428,13 @@ def render_language_table(rows):
     if not rows:
         return ""
 
+    rows = [
+        row for row in (rows or [])
+        if len(row) == 3 and not is_invalid_hindi_language_row(row[0], row[1], row[2])
+    ]
+    if not rows:
+        return ""
+
     body_rows = []
     lines = [
         """
@@ -3716,6 +3735,8 @@ def parse_language_rows(table_md, article_data=None):
     for original, corrected, reason in matches:
         if original.lower() == "original":
             continue
+        if is_invalid_hindi_language_row(original, corrected, reason):
+            continue
         if all(re.fullmatch(r":?-{2,}:?", cell.strip()) for cell in (original, corrected, reason)):
             continue
         if any(x.strip() in {"-", "--", "---"} for x in (original, corrected, reason)):
@@ -3827,6 +3848,8 @@ def build_language_tables(language_rows, editorial_rows=None):
 
     for original, corrected, reason in (language_rows or []) + (editorial_rows or []):
         if not original or not corrected or not reason:
+            continue
+        if is_invalid_hindi_language_row(original, corrected, reason):
             continue
         if should_skip_language_change(original, corrected, reason):
             continue
