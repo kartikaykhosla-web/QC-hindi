@@ -2493,12 +2493,43 @@ def is_ambiguous_homophone_correction(original: str, corrected: str, reason: str
     return not any(marker in context for marker in beverage_markers)
 
 DEVANAGARI_DIGIT_TRANSLATION = str.maketrans("०१२३४५६७८९", "0123456789")
+LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
+DEVANAGARI_CHAR_RE = re.compile(r"[\u0900-\u097F]")
 
 def normalize_digit_text(text: str) -> str:
     return (text or "").translate(DEVANAGARI_DIGIT_TRANSLATION)
 
 def extract_year_tokens(text: str):
     return re.findall(r"\b20\d{2}\b", normalize_digit_text(text))
+
+def has_latin_text(text: str) -> bool:
+    return bool(LATIN_CHAR_RE.search(text or ""))
+
+def has_devanagari_text(text: str) -> bool:
+    return bool(DEVANAGARI_CHAR_RE.search(text or ""))
+
+def is_script_translation_correction(original: str, corrected: str, reason: str) -> bool:
+    original_text = original or ""
+    corrected_text = corrected or ""
+    reason_lower = (reason or "").strip().lower()
+
+    if not has_devanagari_text(original_text):
+        return False
+    if not has_latin_text(corrected_text):
+        return False
+
+    # In the Hindi app, rows that rewrite Devanagari words/months/labels into
+    # English/Latin script are invalid even when the model claims style reasons.
+    if not has_latin_text(original_text):
+        return True
+
+    english_markers = (
+        "british english",
+        "transliterated english",
+        "convert date to british english format",
+        "convert transliterated english",
+    )
+    return any(marker in reason_lower for marker in english_markers)
 
 def is_year_drift_correction(original: str, corrected: str, reason: str) -> bool:
     original_years = extract_year_tokens(original)
@@ -2525,6 +2556,7 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
         is_redundant_gender_rewrite(original, corrected, reason),
         is_token_equivalent_correction(original, corrected, reason),
         is_ambiguous_homophone_correction(original, corrected, reason),
+        is_script_translation_correction(original, corrected, reason),
         is_year_drift_correction(original, corrected, reason),
     ))
 
@@ -3935,6 +3967,7 @@ Guidance:
 - Do not enforce subjective style preferences such as replacing acceptable loanwords,
   banning sentence openings like "लेकिन", or mandating commas after specific discourse markers.
 - Do not translate acceptable English technical terms into Hindi just to make a correction.
+- Never transliterate or translate Devanagari Hindi words, month names, place names, or bylines into English/Latin script as a correction (for example, do not change "मई" to "May" or "न्यूज़" to "News").
 
 Constraints:
 - Use only TEXT
@@ -3964,6 +3997,7 @@ Must-follow Hindi editorial rules:
 - For established loanwords that conventionally use the "ऑ" sound, prefer the standard spelling with "ऑ" only when the correction is genuinely unambiguous (for example, "कापी" -> "कॉपी", "कालेज" -> "कॉलेज"). Do not replace "काफी" with "कॉफी" unless the text clearly refers to the beverage.
 - For transliterated proper nouns or foreign names ending in "िए", prefer the house-style "िये" ending when that is clearly the intended pronunciation/transliteration (for example, "तुर्किए" -> "तुर्किये"). Do not change ordinary Hindi verb forms such as "लिए", "दिए", "किए", "चाहिए", or "दीजिए".
 - Do not create subjective wording changes.
+- Never transliterate or translate Devanagari Hindi words, month names, place names, or bylines into English/Latin script as a correction.
 - Original must be an exact substring from TEXT.
 
 {rules_block}
