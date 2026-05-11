@@ -2549,6 +2549,24 @@ def is_unhelpful_function_word_row(original: str, corrected: str) -> bool:
         return False
     return len(word_tokens_hi(original)) <= 2 and len(word_tokens_hi(corrected)) <= 2
 
+def changed_function_word_tokens_only(original: str, corrected: str) -> bool:
+    original_tokens = [normalise_hi(token) for token in word_tokens_hi(original)]
+    corrected_tokens = [normalise_hi(token) for token in word_tokens_hi(corrected)]
+    if not original_tokens or not corrected_tokens:
+        return False
+
+    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens)
+    changed_tokens = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        changed_tokens.extend(token for token in original_tokens[i1:i2] if token)
+        changed_tokens.extend(token for token in corrected_tokens[j1:j2] if token)
+
+    if not changed_tokens:
+        return False
+    return all(token in COMMON_HINDI_FUNCTION_WORDS for token in changed_tokens)
+
 def is_year_drift_correction(original: str, corrected: str, reason: str) -> bool:
     original_years = extract_year_tokens(original)
     corrected_years = extract_year_tokens(corrected)
@@ -2564,6 +2582,7 @@ def should_skip_language_change(original: str, corrected: str, reason: str) -> b
     return any((
         is_invalid_hindi_language_row(original, corrected, reason),
         is_unhelpful_function_word_row(original, corrected),
+        changed_function_word_tokens_only(original, corrected),
         is_noop_reason(reason),
         is_noop_correction(original, corrected),
         is_visually_identical_correction(original, corrected),
