@@ -2544,6 +2544,11 @@ def is_invalid_hindi_language_row(original: str, corrected: str, reason: str) ->
         is_year_drift_correction(original, corrected, reason),
     ))
 
+def is_unhelpful_function_word_row(original: str, corrected: str) -> bool:
+    if not is_common_hindi_function_word_change(original, corrected):
+        return False
+    return len(word_tokens_hi(original)) <= 2 and len(word_tokens_hi(corrected)) <= 2
+
 def is_year_drift_correction(original: str, corrected: str, reason: str) -> bool:
     original_years = extract_year_tokens(original)
     corrected_years = extract_year_tokens(corrected)
@@ -2558,6 +2563,7 @@ def is_year_drift_correction(original: str, corrected: str, reason: str) -> bool
 def should_skip_language_change(original: str, corrected: str, reason: str) -> bool:
     return any((
         is_invalid_hindi_language_row(original, corrected, reason),
+        is_unhelpful_function_word_row(original, corrected),
         is_noop_reason(reason),
         is_noop_correction(original, corrected),
         is_visually_identical_correction(original, corrected),
@@ -2956,6 +2962,22 @@ def find_context_snippet(article_data, needle: str) -> str:
 
     return ""
 
+COMMON_HINDI_FUNCTION_WORDS = {
+    normalise_hi(token) for token in {
+        "में", "मे", "के", "की", "का", "को", "से", "ने", "पर",
+        "और", "या", "तो", "ही", "भी", "है", "हैं", "था", "थे", "थी",
+    }
+}
+
+def is_common_hindi_function_word_change(original: str, corrected: str) -> bool:
+    original_tokens = [normalise_hi(token) for token in word_tokens_hi(original)]
+    corrected_tokens = [normalise_hi(token) for token in word_tokens_hi(corrected)]
+    if not original_tokens or not corrected_tokens:
+        return False
+    if len(original_tokens) != len(corrected_tokens) or len(original_tokens) > 2:
+        return False
+    return all(token in COMMON_HINDI_FUNCTION_WORDS for token in original_tokens + corrected_tokens)
+
 def needs_context_expansion(original: str, reason: str) -> bool:
     if not original:
         return False
@@ -2974,6 +2996,8 @@ def needs_context_expansion(original: str, reason: str) -> bool:
 def expand_language_row_context(article_data, original: str, corrected: str, reason: str):
     if not needs_context_expansion(original, reason):
         return original, corrected, reason
+    if is_common_hindi_function_word_change(original, corrected):
+        return original, corrected, reason
 
     context = find_context_snippet(article_data, original)
     if not context:
@@ -2982,6 +3006,11 @@ def expand_language_row_context(article_data, original: str, corrected: str, rea
         return original, corrected, reason
     if original not in context:
         return original, corrected, reason
+    if len(original.split()) <= 2:
+        norm_context = normalize_for_match(context)
+        norm_original = normalize_for_match(original)
+        if norm_original and norm_context.count(norm_original) != 1:
+            return original, corrected, reason
 
     corrected_context = context.replace(original, corrected, 1)
     if canon_hi(corrected_context) == canon_hi(context):
@@ -3295,6 +3324,8 @@ def classify_language_issue(original, corrected, reason):
     if visible_text_signature(original) == visible_text_signature(corrected):
         return "grammar"
     if is_likely_grammar_form_change(original, corrected):
+        return "grammar"
+    if is_common_hindi_function_word_change(original, corrected):
         return "grammar"
     if is_spelling_reason(reason):
         return "spelling"
