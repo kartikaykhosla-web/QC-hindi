@@ -32,6 +32,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone, timedelta
 import streamlit as st
+import streamlit.components.v1 as components
 IMPORT_ONLY = os.environ.get("QC_HINDI_IMPORT_ONLY") == "1"
 try:
     import extra_streamlit_components as stx
@@ -68,8 +69,26 @@ from google.genai import types as genai_types
 # =================================================
 # STREAMLIT CONFIG
 # =================================================
+AUTO_REFRESH_INTERVAL_MS = 60 * 60 * 1000
+
+
+def inject_auto_refresh(interval_ms: int = AUTO_REFRESH_INTERVAL_MS) -> None:
+    components.html(
+        f"""
+        <script>
+        window.setTimeout(function () {{
+            window.parent.location.reload();
+        }}, {interval_ms});
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 if not IMPORT_ONLY:
     st.set_page_config(page_title="Hindi Article QC Tool (Gemini)", layout="wide")
+    inject_auto_refresh()
 
 def _secret(name: str, default=""):
     try:
