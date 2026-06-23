@@ -4410,6 +4410,58 @@ def is_material_fact_candidate(sentence: str) -> bool:
         return True
     return False
 
+def is_current_implication_fact_candidate(sentence: str) -> bool:
+    sent = re.sub(r"\s+", " ", (sentence or "").strip())
+    lower = sent.lower()
+    if len(sent) < 35:
+        return False
+    has_time_marker = bool(re.search(
+        r"\b(?:18|19|20)\d{2}\b|\b(?:currently|now|today|as of|latest|this year|last year|presently)\b|"
+        r"(?:वर्तमान|फिलहाल|अभी|आज|ताजा|लेटेस्ट|इस साल|पिछले साल|मौजूदा)",
+        lower,
+    ))
+    if not has_time_marker:
+        return False
+    return bool(re.search(
+        r"\b(?:is|are|remains?|continues?|serves as|holds?|owns?|available|unavailable|open|closed|active|inactive|existing|defunct|current|latest|reigning|incumbent|former|record|ranked|largest|smallest|highest|lowest|first|only|last|ended|finished|retired|ceased|stopped|resigned|appointed|elected|joined|left)\b|"
+        r"(?:है|हैं|था|थे|रहे|रही|रहा|मौजूदा|वर्तमान|पूर्व|रिकॉर्ड|रैंक|सबसे|पहला|पहली|एकमात्र|आखिरी|अंतिम|समाप्त|खत्म|रिटायर|सेवानिवृत्त|छोड़ा|इस्तीफा|नियुक्त|चुने|उपलब्ध|बंद|चालू|सक्रिय|निष्क्रिय)",
+        lower,
+    ))
+
+def is_high_risk_current_status_statement(sentence: str) -> bool:
+    sent = re.sub(r"\s+", " ", (sentence or "").strip())
+    lower = sent.lower()
+    if not is_current_implication_fact_candidate(sent):
+        return False
+    current_status_markers = (
+        "career", "करियर",
+        "role", "भूमिका",
+        "position", "पद",
+        "office", "कार्यालय",
+        "title", "खिताब",
+        "status", "स्थिति",
+        "rank", "ranking", "रैंक",
+        "record", "रिकॉर्ड",
+        "ownership", "owner", "मालिक", "स्वामित्व",
+        "company", "कंपनी",
+        "school", "स्कूल",
+        "hospital", "अस्पताल",
+        "store", "दुकान",
+        "platform", "प्लेटफॉर्म",
+        "service", "सेवा",
+        "app", "ऐप",
+        "website", "वेबसाइट",
+        "airport", "हवाई अड्डा", "एयरपोर्ट",
+        "station", "स्टेशन",
+        "available", "availability", "उपलब्ध",
+        "active", "inactive", "सक्रिय", "निष्क्रिय",
+        "existing", "defunct", "मौजूद", "बंद",
+        "current", "currently", "मौजूदा", "वर्तमान", "फिलहाल",
+        "latest", "लेटेस्ट", "ताजा",
+        "reigning", "incumbent",
+    )
+    return any(marker in lower for marker in current_status_markers)
+
 def is_material_date_claim(sentence: str) -> bool:
     sent = (sentence or "").strip().lower()
     if len(sent) < 20:
@@ -4636,6 +4688,14 @@ def gemini_fact_check(article_data):
     last_error = None
     today_iso = datetime.now(timezone.utc).date().isoformat()
     client = init_vertex_and_model()
+    current_implication_statements = [
+        stmt for stmt in statements
+        if is_current_implication_fact_candidate(stmt)
+    ]
+    high_risk_current_status_statements = [
+        stmt for stmt in current_implication_statements
+        if is_high_risk_current_status_statement(stmt)
+    ]
 
     for batch in chunked(statements, 5):
         block = "\n".join(f"- {s}" for s in batch)
@@ -4758,6 +4818,112 @@ STATEMENTS:
 
     if not rows and not had_success:
         return format_ai_error("fact", last_error or RuntimeError("No Gemini response"))
+
+    for batch in chunked(high_risk_current_status_statements, 5):
+        block = "\n".join(f"- {s}" for s in batch)
+
+        prompt = f"""
+You are an internal factual accuracy auditor for current news copy.
+
+Today's date: {today_iso}
+
+Task:
+- Use Google Search grounding to verify each statement's current-status implication.
+- Return exactly one row for every statement listed under STATEMENTS.
+- Decompose mixed statements into:
+  1. historical event or date claim
+  2. implied current status, role, availability, existence, record, rank, ownership, or final condition
+- If the historical part is true but the current implication is false or outdated, Status must be ISSUE.
+- If the statement is fully accurate as written, Status must be VERIFIED.
+- Use UNVERIFIABLE only if grounded search cannot establish the current implication after checking reliable sources.
+- For ISSUE rows, Correct Fact must give the specific corrected fact; do not use generic uncertainty wording.
+- For UNVERIFIABLE rows, Correct Fact must be exactly: "Could not verify reliably as of {today_iso}."
+- Quote exact text from the article under "Statement".
+- Return "Issue" and "Correct Fact" in the same language as the article text.
+
+Return table:
+| Statement | Status | Issue | Correct Fact |
+
+Allowed Status values: ISSUE, VERIFIED, UNVERIFIABLE
+
+TEXT:
+{publication_date_context}{full_text}
+
+STATEMENTS:
+{block}
+"""
+
+        try:
+            response = client.models.generate_content(
+                model=MODEL_FLASH,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    topP=1,
+                    topK=1,
+                    candidateCount=1,
+                    maxOutputTokens=1024,
+                    seed=0,
+                    responseMimeType="text/plain",
+                    thinkingConfig=genai_types.ThinkingConfig(thinkingBudget=0),
+                    tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                ),
+            )
+            out = response.text or ""
+            had_success = True
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        matches = re.findall(
+            r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
+            out
+        )
+
+        for s, status, i, c in matches:
+            if s.lower() == "statement" or status.lower() == "status":
+                continue
+            status_upper = (status or "").strip().upper()
+            if status_upper == "VERIFIED":
+                continue
+            if status_upper not in {"ISSUE", "UNVERIFIABLE"}:
+                continue
+            if any(x.strip() in {"-", "--", "---"} for x in (s, status, i, c)):
+                continue
+            if is_empty_or_omitted_fact_issue(i, c):
+                continue
+            if is_no_issue_fact(i, c):
+                continue
+            if is_style_only_fact(s, i, c):
+                continue
+            if is_supportive_health_fact(s, i, c):
+                continue
+            if is_dynamic_schedule_or_pricing_fact(s, i, c):
+                continue
+            if is_self_conflicting_fact_correction(s, i, c):
+                continue
+            if is_publication_date_conflict_fact(i, c, article_data):
+                continue
+
+            if status_upper == "UNVERIFIABLE":
+                i = "Needs verification (current)"
+                c = f"Could not verify reliably as of {today_iso}."
+            else:
+                c = (c or "").strip()
+                if not c or c in {"-", "--", "---"}:
+                    continue
+
+            cluster_key = fact_issue_cluster_key(i, c, today_iso)
+            if cluster_key and cluster_key in seen_clusters:
+                continue
+            sig = (canon_hi(s), canon_hi(i))
+            if sig in seen:
+                continue
+
+            seen.add(sig)
+            if cluster_key:
+                seen_clusters.add(cluster_key)
+            rows.append(f"| {s} | {i} | {c} |")
 
     deterministic_rows = build_religious_year_context_rows(statements, article_data)
     for s, i, c in deterministic_rows:
